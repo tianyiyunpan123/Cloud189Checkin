@@ -61,7 +61,7 @@ const doFamilyTask = async (cloudClient) => {
   const result = [];
   if (familyInfoResp) {
     for (let index = 0; index < familyInfoResp.length; index += 1) {
-      const { familyId } = familyInfoResp[index];
+      const { familyId } = familyInfoResp[index];console.log(familylD);
       const res = await cloudClient.familyUserSign(familyId);
       result.push(
         "家庭任务" +
