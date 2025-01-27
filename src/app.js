@@ -1,4 +1,4 @@
- const { CloudClient } = require("cloud189-sdk");
+const { CloudClient } = require("cloud189-sdk");
 
 // 敏感信息掩码工具
 const mask = (s, start = 3, end = 7) => s.split("").fill("*", start, end).join("");
@@ -51,14 +51,14 @@ const doFamilyTask = async (cloudClient) => {
   if (familyInfoResp?.length) {
     for (const { familyId } of familyInfoResp) {
       try {
-        const familyIdStr = String(familyId || "165515815004439"); // 确保是字符串
+        const familyIdStr = String(familyId || ""); // 确保是字符串
         const res = await cloudClient.familyUserSign(familyIdStr);
         result.push(
           `家庭空间${familyIdStr.slice(-4)}：${res.signStatus ? "已签到" : "签到成功"}，获得 ${res.bonusSpace}M 空间`
         );
       } catch (err) {
         console.error(`处理 familyId ${familyId} 时出错：`, err.message);
-        result.push(`⚠️ 家庭空间 ${familyId} 签到失败：${err.message}`);
+        result.push(` 家庭空间 ${familyId} 签到失败：${err.message}`);
       }
     }
   } else {
@@ -71,12 +71,12 @@ const doFamilyTask = async (cloudClient) => {
 async function main(userName, password) {
   const userNameInfo = mask(userName);
   try {
-    message.push(`\n🔔 账号 ${userNameInfo} 开始执行`);
+    message.push(`\n 账号 ${userNameInfo} 开始执行`);
     const cloudClient = new CloudClient(userName, password);
     
     // 登录验证
     if (!await cloudClient.login()) {
-      message.push(`❌ 账号 ${userNameInfo} 登录失败`);
+      message.push(` 账号 ${userNameInfo} 登录失败`);
       return;
     }
 
@@ -98,3 +98,58 @@ async function main(userName, password) {
     totalPersonalGB += personalGB;
     totalFamilyGB += familyGB;
     capacityDetails.push({ userNameInfo, personalGB, familyGB });
+
+    // 记录容量信息
+    message.push(
+      ` 当前容量：个人 ${personalGB.toFixed(2)}G | 家庭 ${familyGB.toFixed(2)}G`
+    );
+
+  } catch (e) {
+    message.push(` 账号 ${userNameInfo} 执行异常：${e.message}`);
+  } finally {
+    message.push(` 账号 ${userNameInfo} 执行完毕`);
+  }
+}
+
+// 程序入口
+(async () => {
+  try {
+    // 从环境变量读取账号 (格式：username|password)
+    const c189s = process.env.CLOUD_189?.split('\n') || [];
+    
+    if (!c189s.length) {
+      message.push(" 未配置环境变量 CLOUD_189");
+      return;
+    }
+
+    // 遍历执行所有账号
+    for (const account of c189s) {
+      const [username, password] = account.split('|');
+      if (username?.trim() && password?.trim()) {
+        await main(username.trim(), password.trim());
+        await delay(5000); // 账号间间隔
+      }
+    }
+
+    // 生成汇总报告
+    if (capacityDetails.length) {
+      message.push("\n ===== 容量汇总 =====");
+      capacityDetails.forEach(({ userNameInfo, personalGB, familyGB }) => {
+        message.push(
+          `${userNameInfo.padEnd(10)}：个人 ${personalGB.toFixed(2).padStart(8)}G | 家庭 ${familyGB.toFixed(2).padStart(8)}G`
+        );
+      });
+      message.push(
+        "".padEnd(25, "─"), 
+        `总计：个人 ${totalPersonalGB.toFixed(2)}G | 家庭 ${totalFamilyGB.toFixed(2)}G`
+      );
+    }
+
+  } catch (e) {
+    message.push(` 全局异常：${e.message}`);
+  } finally {
+    // 发送通知并输出日志
+    console.log(message.join('\n'));
+    await QLAPI?.notify?.('天翼云盘签到', message.join('\n'));
+  }
+})();@Noting is impossible. 
