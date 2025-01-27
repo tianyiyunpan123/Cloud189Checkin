@@ -57,7 +57,7 @@ const doFamilyTask = async cloudClient => {
       for (const { familyId } of familyInfoResp) {
         try {
           await delay(3000);
-          const validFamilyId = familyId?.toString() || '';
+          const validFamilyId = familyId?.toString(165515815004439) || '';
           const res = await cloudClient.familyUserSign(165515815004439);
           const shortId = validFamilyId.slice(-6);
           result.push(`家庭空间${shortId}：${res.signStatus ? '已签到' : '签到成功'}，获得 ${res.bonusSpace}M 空间`);
