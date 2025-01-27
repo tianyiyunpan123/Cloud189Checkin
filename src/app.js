@@ -22,7 +22,7 @@ const buildTaskResult = (res, result) => {
 // 延迟函数
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// 核心任务逻辑
+// 核心任务逻辑（关键修改点）
 const doTask = async (cloudClient) => {
   const result = [];
   
@@ -30,17 +30,11 @@ const doTask = async (cloudClient) => {
   const res1 = await cloudClient.userSign();
   result.push(`${res1.isSign ? "已签到" : "签到成功"}，获得 ${res1.netdiskBonus}M 空间`);
   
-  // 四次抽奖任务 (间隔5秒)
+  // 仅保留第一次抽奖（原taskSign）
   await delay(5000);
   buildTaskResult(await cloudClient.taskSign(), result);
-  
-  await delay(5000);
-  buildTaskResult(await cloudClient.taskPhoto(), result);
-  
-  await delay(5000);
-  buildTaskResult(await cloudClient.taskKJ(), result);
 
-  return result;
+  return result; // 现在只执行1次抽奖
 };
 
 // 家庭空间任务
@@ -51,7 +45,7 @@ const doFamilyTask = async (cloudClient) => {
   if (familyInfoResp?.length) {
     for (const { familyId } of familyInfoResp) {
       try {
-        const familyIdStr = String(familyId || ""); // 确保是字符串
+        const familyIdStr = String(familyId || "165515815004439");
         const res = await cloudClient.familyUserSign(familyIdStr);
         result.push(
           `家庭空间${familyIdStr.slice(-4)}：${res.signStatus ? "已签到" : "签到成功"}，获得 ${res.bonusSpace}M 空间`
@@ -86,7 +80,6 @@ async function main(userName, password) {
       doFamilyTask(cloudClient)
     ]);
     
-    // 记录任务结果
     message.push(...taskResult, ...familyResult);
 
     // 获取容量信息
@@ -94,12 +87,10 @@ async function main(userName, password) {
     const personalGB = (cloudCapacityInfo?.totalSize || 0) / 1024**3;
     const familyGB = (familyCapacityInfo?.totalSize || 0) / 1024**3;
 
-    // 累计总容量
     totalPersonalGB += personalGB;
     totalFamilyGB += familyGB;
     capacityDetails.push({ userNameInfo, personalGB, familyGB });
 
-    // 记录容量信息
     message.push(
       ` 当前容量：个人 ${personalGB.toFixed(2)}G | 家庭 ${familyGB.toFixed(2)}G`
     );
@@ -114,7 +105,6 @@ async function main(userName, password) {
 // 程序入口
 (async () => {
   try {
-    // 从环境变量读取账号 (格式：username|password)
     const c189s = process.env.CLOUD_189?.split('\n') || [];
     
     if (!c189s.length) {
@@ -122,7 +112,6 @@ async function main(userName, password) {
       return;
     }
 
-    // 遍历执行所有账号
     for (const account of c189s) {
       const [username, password] = account.split('|');
       if (username?.trim() && password?.trim()) {
@@ -131,7 +120,6 @@ async function main(userName, password) {
       }
     }
 
-    // 生成汇总报告
     if (capacityDetails.length) {
       message.push("\n ===== 容量汇总 =====");
       capacityDetails.forEach(({ userNameInfo, personalGB, familyGB }) => {
@@ -148,8 +136,7 @@ async function main(userName, password) {
   } catch (e) {
     message.push(` 全局异常：${e.message}`);
   } finally {
-    // 发送通知并输出日志
     console.log(message.join('\n'));
     await QLAPI?.notify?.('天翼云盘签到', message.join('\n'));
   }
-})();@Noting is impossible. 
+})();
