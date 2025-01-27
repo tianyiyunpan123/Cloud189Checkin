@@ -1,246 +1,187 @@
-/* eslint-disable no-await-in-loop */
-require("dotenv").config();
-const log4js = require("log4js");
-const recording = require("log4js/lib/appenders/recording");
-log4js.configure({
-  appenders: {
-    vcr: {
-      type: "recording",
-    },
-    out: {
-      type: "console",
-    },
-  },
-  categories: { default: { appenders: ["vcr", "out"], level: "info" } },
-});
-
-const logger = log4js.getLogger();
-// process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0'
-const superagent = require("superagent");
 const { CloudClient } = require("cloud189-sdk");
-const serverChan = require("./push/serverChan");
-const telegramBot = require("./push/telegramBot");
-const wecomBot = require("./push/wecomBot");
-const wxpush = require("./push/wxPusher");
-const accounts = require("../accounts");
 
-const mask = (s, start, end) => s.split("").fill("*", start, end).join("");
-
-const buildTaskResult = (res, result) => {
-  const index = result.length;
-  if (res.errorCode === "User_Not_Chance") {
-    result.push(`第${index}次抽奖失败,次数不足`);
-  } else {
-    result.push(`第${index}次抽奖成功,抽奖获得${res.prizeName}`);
-  }
+// 增强版敏感信息掩码（显示前3后4）
+const mask = (s, visibleStart = 3, visibleEnd = 4) => {
+  if (!s || s.length <= visibleStart + visibleEnd) return s;
+  return `${s.slice(0, visibleStart)}${'*'.repeat(s.length - visibleStart - visibleEnd)}${s.slice(-visibleEnd)}`;
 };
 
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// 容量统计相关
+let totalPersonalGB = 0;
+let totalFamilyGB = 0;
+const capacityDetails = [];
+const message = [];
 
-// 任务 1.签到 2.天天抽红包 3.自动备份抽红包
-const doTask = async (cloudClient) => {
+// 抽奖结果处理
+const buildTaskResult = (res, index) => {
+  if (!res) return `第${index}次抽奖失败：无响应`;
+  return res.errorCode === "User_Not_Chance" 
+    ? `第${index}次抽奖失败，次数不足` 
+    : `第${index}次抽奖成功，获得 ${res.prizeName || '未知奖励'}`;
+};
+
+// 延迟函数
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// 个人任务（签到+单次抽奖）
+const doPersonalTask = async cloudClient => {
   const result = [];
-  const res1 = await cloudClient.userSign();
-  result.push(
-    `${res1.isSign ? "已经签到过了，" : ""}签到获得${res1.netdiskBonus}M空间`
-  );
-  await delay(5000); // 延迟5秒
+  
+  try {
+    // 个人签到
+    const signRes = await cloudClient.userSign();
+    result.push(`${signRes.isSign ? '已签到' : '签到成功'}，获得 ${signRes.netdiskBonus}M 空间`);
+  } catch (e) {
+    result.push(`❌ 个人签到失败：${e.message}`);
+  }
 
-  const res2 = await cloudClient.taskSign();
-  buildTaskResult(res2, result);
-
-  await delay(5000); // 延迟5秒
-  const res3 = await cloudClient.taskPhoto();
-  buildTaskResult(res3, result);
+  // 仅保留第一次抽奖
+  try {
+    await delay(5000); // 保持5秒间隔
+    const res = await cloudClient.taskSign();
+    result.push(buildTaskResult(res, 1));
+  } catch (e) {
+    result.push(`第1次抽奖异常：${e.message}`);
+  }
 
   return result;
 };
 
-const doFamilyTask = async (cloudClient) => {
-  const { familyInfoResp } = await cloudClient.getFamilyList();
+// 家庭空间任务
+const doFamilyTask = async cloudClient => {
   const result = [];
-  if (familyInfoResp) {
-    for (let index = 0; index < familyInfoResp.length; index += 1) {
-      const { familyId } = familyInfoResp[index];
-      const res = await cloudClient.familyUserSign(165515815004439);
-      result.push(
-        "家庭任务" +
-          `${res.signStatus ? "已经签到过了，" : ""}签到获得${
-            res.bonusSpace
-          }M空间`
-      );
-    }
-  }
-  return result;
-};
-
-const pushServerChan = (title, desp) => {
-  if (!serverChan.sendKey) {
-    return;
-  }
-  const data = {
-    title,
-    desp,
-  };
-  superagent
-    .post(`https://sctapi.ftqq.com/${serverChan.sendKey}.send`)
-    .type("form")
-    .send(data)
-    .end((err, res) => {
-      if (err) {
-        logger.error(`ServerChan推送失败:${JSON.stringify(err)}`);
-        return;
-      }
-      const json = JSON.parse(res.text);
-      if (json.code !== 0) {
-        logger.error(`ServerChan推送失败:${JSON.stringify(json)}`);
-      } else {
-        logger.info("ServerChan推送成功");
-      }
-    });
-};
-
-const pushTelegramBot = (title, desp) => {
-  if (!(telegramBot.botToken && telegramBot.chatId)) {
-    return;
-  }
-  const data = {
-    chat_id: telegramBot.chatId,
-    text: `${title}\n\n${desp}`,
-  };
-  superagent
-    .post(`https://api.telegram.org/bot${telegramBot.botToken}/sendMessage`)
-    .type("form")
-    .send(data)
-    .end((err, res) => {
-      if (err) {
-        logger.error(`TelegramBot推送失败:${JSON.stringify(err)}`);
-        return;
-      }
-      const json = JSON.parse(res.text);
-      if (!json.ok) {
-        logger.error(`TelegramBot推送失败:${JSON.stringify(json)}`);
-      } else {
-        logger.info("TelegramBot推送成功");
-      }
-    });
-};
-
-const pushWecomBot = (title, desp) => {
-  if (!(wecomBot.key && wecomBot.telphone)) {
-    return;
-  }
-  const data = {
-    msgtype: "text",
-    text: {
-      content: `${title}\n\n${desp}`,
-      mentioned_mobile_list: [wecomBot.telphone],
-    },
-  };
-  superagent
-    .post(
-      `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=${wecomBot.key}`
-    )
-    .send(data)
-    .end((err, res) => {
-      if (err) {
-        logger.error(`wecomBot推送失败:${JSON.stringify(err)}`);
-        return;
-      }
-      const json = JSON.parse(res.text);
-      if (json.errcode) {
-        logger.error(`wecomBot推送失败:${JSON.stringify(json)}`);
-      } else {
-        logger.info("wecomBot推送成功");
-      }
-    });
-};
-
-const pushWxPusher = (title, desp) => {
-  if (!(wxpush.appToken && wxpush.uid)) {
-    return;
-  }
-  const data = {
-    appToken: wxpush.appToken,
-    contentType: 1,
-    summary: title,
-    content: desp,
-    uids: [wxpush.uid],
-  };
-  superagent
-    .post("https://wxpusher.zjiecode.com/api/send/message")
-    .send(data)
-    .end((err, res) => {
-      if (err) {
-        logger.error(`wxPusher推送失败:${JSON.stringify(err)}`);
-        return;
-      }
-      const json = JSON.parse(res.text);
-      if (json.data[0].code !== 1000) {
-        logger.error(`wxPusher推送失败:${JSON.stringify(json)}`);
-      } else {
-        logger.info("wxPusher推送成功");
-      }
-    });
-};
-
-const push = (title, desp) => {
-  pushServerChan(title, desp);
-  pushTelegramBot(title, desp);
-  pushWecomBot(title, desp);
-  pushWxPusher(title, desp);
-};
-
-// 开始执行程序
-async function main() {
-  for (let index = 0; index < accounts.length; index += 1) {
-    const account = accounts[index];
-    const { userName, password } = account;
-    if (userName && password) {
-      const userNameInfo = mask(userName, 3, 7);
-      try {
-        logger.log(`账户 ${userNameInfo}开始执行`);
-        const cloudClient = new CloudClient(userName, password);
-        await cloudClient.login();
-        const result = await doTask(cloudClient);
-        result.forEach((r) => logger.log(r));
-        const familyResult = await doFamilyTask(cloudClient);
-        familyResult.forEach((r) => logger.log(r));
-        logger.log("任务执行完毕");
-        const { cloudCapacityInfo, familyCapacityInfo } =
-          await cloudClient.getUserSizeInfo();
-        logger.log(
-          `个人总容量：${(
-            cloudCapacityInfo.totalSize /
-            1024 /
-            1024 /
-            1024
-          ).toFixed(2)}G,家庭总容量：${(
-            familyCapacityInfo.totalSize /
-            1024 /
-            1024 /
-            1024
-          ).toFixed(2)}G`
-        );
-      } catch (e) {
-        logger.error(e);
-        if (e.code === "ETIMEDOUT") {
-          throw e;
+  try {
+    const { familyInfoResp } = await cloudClient.getFamilyList();
+    
+    if (familyInfoResp?.length) {
+      for (const { familyId } of familyInfoResp) {
+        try {
+          await delay(3000);
+          const validFamilyId = familyId?.toString() || '';
+          const res = await cloudClient.familyUserSign(165515815004439);
+          const shortId = validFamilyId.slice(-6);
+          result.push(`家庭空间${shortId}：${res.signStatus ? '已签到' : '签到成功'}，获得 ${res.bonusSpace}M 空间`);
+        } catch (e) {
+          result.push(`⚠️ 家庭空间 ${familyId} 签到失败：${e.message}`);
         }
-      } finally {
-        logger.log(`账户 ${userNameInfo}执行完毕`);
       }
+    } else {
+      result.push('未找到家庭空间信息');
     }
+  } catch (e) {
+    result.push(`❌ 家庭空间查询失败：${e.message}`);
+  }
+  return result;
+};
+
+// 账号主流程
+async function main(userName, password) {
+  const maskedName = mask(userName);
+  const accountLog = [`\n🔔 账号 ${maskedName}`];
+  
+  try {
+    const cloudClient = new CloudClient(userName, password);
+    
+    if (!await cloudClient.login()) {
+      accountLog.push('❌ 登录失败');
+      message.push(...accountLog);
+      return;
+    }
+
+    // 执行任务流程
+    const [personalResult, familyResult] = await Promise.all([
+      doPersonalTask(cloudClient),
+      doFamilyTask(cloudClient)
+    ]);
+    accountLog.push(...personalResult, ...familyResult);
+
+    // 容量统计
+    try {
+      const { cloudCapacityInfo, familyCapacityInfo } = await cloudClient.getUserSizeInfo();
+      const personalGB = (cloudCapacityInfo?.totalSize || 0) / 1024 ** 3;
+      const familyGB = (familyCapacityInfo?.totalSize || 0) / 1024 ** 3;
+
+      totalPersonalGB += personalGB;
+      totalFamilyGB += familyGB;
+      capacityDetails.push({ maskedName, personalGB, familyGB });
+      
+      accountLog.push(`📦 当前容量：个人 ${personalGB.toFixed(2)}G | 家庭 ${familyGB.toFixed(2)}G`);
+    } catch (e) {
+      accountLog.push(`❌ 容量查询失败：${e.message}`);
+    }
+
+  } catch (e) {
+    accountLog.push(`⚠️ 执行异常：${e.message}`);
+  } finally {
+    accountLog.push('✅ 执行完毕');
+    message.push(accountLog.join('\n   ├─ '));
   }
 }
 
+// 程序入口
 (async () => {
   try {
-    await main();
+    const c189Accounts = process.env.CLOUD_189?.split('\n')?.filter(Boolean) || [];
+    
+    if (!c189Accounts.length) {
+      message.push('❌ 未配置环境变量 CLOUD_189');
+      return;
+    }
+
+    message.push('=== 天翼云盘自动签到开始 ===');
+    
+    // 顺序处理所有账号
+    for (const account of c189Accounts) {
+      const sepIndex = account.indexOf('|');
+      if (sepIndex === -1) {
+        message.push(`❌ 无效账号格式：${mask(account)}`);
+        continue;
+      }
+      
+      const [user, pass] = [account.slice(0, sepIndex).trim(), account.slice(sepIndex + 1).trim()];
+      if (!user || !pass) {
+        message.push(`❌ 无效账号凭证：${mask(account)}`);
+        continue;
+      }
+
+      await main(user, pass);
+      await delay(8000); // 账号间间隔8秒
+    }
+
+    // 生成专业汇总报告
+    if (capacityDetails.length) {
+      message.push('\n📊 ==== 容量汇总报告 ====');
+      message.push('账号'.padEnd(18) + '个人容量'.padStart(12) + '家庭容量'.padStart(12));
+      message.push('─'.repeat(42));
+      
+      capacityDetails.forEach(({ maskedName, personalGB, familyGB }) => {
+        message.push(
+          `${maskedName.padEnd(20)}` +
+          `${personalGB.toFixed(2).padStart(10)}G` +
+          `${familyGB.toFixed(2).padStart(12)}G`
+        );
+      });
+      
+      message.push('─'.repeat(42));
+      message.push(
+        '总计'.padEnd(20) +
+        `${totalPersonalGB.toFixed(2).padStart(10)}G` +
+        `${totalFamilyGB.toFixed(2).padStart(12)}G`
+      );
+    }
+
+    message.push('\n=== 任务执行完成 ===');
+
+  } catch (e) {
+    message.push(`⚠️ 全局异常：${e.message}`);
   } finally {
-    const events = recording.replay();
-    const content = events.map((e) => `${e.data.join("")}`).join("  \n");
-    push("天翼云盘自动签到任务", content);
-    recording.erase();
+    console.log(message.join('\n'));
+    try {
+      if (typeof QLAPI !== 'undefined' && QLAPI.notify) {
+        await QLAPI.notify('天翼云盘签到报告', message.join('\n'));
+      }
+    } catch (e) {
+      console.error('通知发送失败：', e.message);
+    }
   }
 })();
