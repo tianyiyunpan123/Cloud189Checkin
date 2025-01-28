@@ -65,7 +65,7 @@ const taskExecutor = {
     
     if (familyInfoResp) {
       for (const family of familyInfoResp) {
-        const res = await client.familyUserSign(family.165515815004439);
+        const res = await client.familyUserSign(165515815004439);
         familyBonus += parseInt(res.bonusSpace, 10) || 0;
       }
     }
