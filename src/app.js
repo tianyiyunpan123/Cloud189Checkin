@@ -22,8 +22,11 @@ const accounts = require("../accounts");
 // 工具函数
 const mask = (s, start, end) => s.split("").fill("*", start, end).join("");
 const format = (bytes, unit = "G") => {
-  if (unit === "G") return (bytes / 1024 / 1024 / 1024).toFixed(2) + "G";
-  return (bytes / 1024 / 1024).toFixed(0) + "M";
+  const gb = bytes / 1024 / 1024 / 1024;
+  const mb = bytes / 1024 / 1024;
+  return unit === "G" 
+    ? `${gb.toFixed(2)}G` 
+    : `${Math.round(mb)}M`;
 };
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -37,59 +40,108 @@ let capacityStats = {
 // 任务处理函数
 const buildTaskResult = (res, result) => {
   const index = result.length;
-  if (res.errorCode === "User_Not_Chance") {
-    result.push(`第${index}次抽奖失败,次数不足`);
-  } else {
-    result.push(`第${index}次抽奖成功,抽奖获得${res.prizeName}`);
-  }
+  res.errorCode === "User_Not_Chance"
+    ? result.push(`第${index}次抽奖失败,次数不足`)
+    : result.push(`第${index}次抽奖成功,获得${res.prizeName}`);
 };
 
 const doTask = async (cloudClient) => {
   const result = [];
-  const res1 = await cloudClient.userSign();
-  result.push(
-    `${res1.isSign ? "已经签到过了，" : ""}签到获得${res1.netdiskBonus}M空间`
-  );
-  await delay(5000);
+  try {
+    const res1 = await cloudClient.userSign();
+    result.push(`${res1.isSign ? "已签到，" : ""}获得${res1.netdiskBonus}M空间`);
+    await delay(2000);
 
-  const res2 = await cloudClient.taskSign();
-  buildTaskResult(res2, result);
-  await delay(5000);
+    const res2 = await cloudClient.taskSign();
+    buildTaskResult(res2, result);
+    await delay(2000);
 
-  const res3 = await cloudClient.taskPhoto();
-  buildTaskResult(res3, result);
-
+    const res3 = await cloudClient.taskPhoto();
+    buildTaskResult(res3, result);
+  } catch (e) {
+    logger.error("任务执行异常:", e.message);
+  }
   return result;
 };
 
 const doFamilyTask = async (cloudClient) => {
   const result = [];
-  const { familyInfoResp } = await cloudClient.getFamilyList();
-  
-  if (familyInfoResp) {
+  try {
+    const { familyInfoResp } = await cloudClient.getFamilyList();
+    if (!familyInfoResp) return result;
+
     for (const family of familyInfoResp) {
       const res = await cloudClient.familyUserSign(165515815004439);
       const bonus = res.bonusSpace || 0;
-      result.push(
-        `家庭任务${res.signStatus ? "已经签到过了，" : ""}签到获得${bonus}M空间`
-      );
-      capacityStats.added.family += bonus * 1024 * 1024; // 转换为字节
+      result.push(`家庭任务${res.signStatus ? "已签到，" : ""}获得${bonus}M空间`);
+      capacityStats.added.family += bonus * 1024 * 1024;
+      await delay(1000);
     }
+  } catch (e) {
+    logger.error("家庭任务异常:", e.message);
   }
   return result;
 };
 
-// 推送函数（保持原有实现）
-const pushServerChan = (title, desp) => { /*...*/ };
-const pushTelegramBot = (title, desp) => { /*...*/ };
-const pushWecomBot = (title, desp) => { /*...*/ };
-const pushWxPusher = (title, desp) => { /*...*/ };
+// ================= 完整微信推送实现 =================
+const pushWecomBot = (title, content) => {
+  if (!(wecomBot.key && wecomBot.telphone)) {
+    logger.info("企业微信配置不完整，跳过推送");
+    return;
+  }
 
-const push = (title, desp) => {
-  pushServerChan(title, desp);
-  pushTelegramBot(title, desp);
-  pushWecomBot(title, desp);
-  pushWxPusher(title, desp);
+  const data = {
+    msgtype: "text",
+    text: {
+      content: `${title}\n\n${content}`,
+      mentioned_mobile_list: [wecomBot.telphone]
+    }
+  };
+
+  superagent
+    .post(`https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=${wecomBot.key}`)
+    .send(data)
+    .then(res => {
+      if (res.body.errcode !== 0) throw new Error(res.body.errmsg);
+      logger.info("企业微信推送成功");
+    })
+    .catch(err => {
+      logger.error(`企业微信推送失败: ${err.message}`);
+    });
+};
+
+const pushWxPusher = (title, content) => {
+  if (!(wxpush.appToken && wxpush.uid)) {
+    logger.info("WxPusher配置不完整，跳过推送");
+    return;
+  }
+
+  const payload = {
+    appToken: wxpush.appToken,
+    contentType: 1,
+    content: content,
+    summary: title,
+    uids: [wxpush.uid]
+  };
+
+  superagent
+    .post("https://wxpusher.zjiecode.com/api/send/message")
+    .send(payload)
+    .then(res => {
+      if (res.body.code !== 1000) throw new Error(res.body.msg);
+      logger.info("WxPusher推送成功");
+    })
+    .catch(err => {
+      logger.error(`WxPusher推送失败: ${err.message}`);
+    });
+};
+
+// 统一推送方法
+const push = (title, content) => {
+  pushServerChan(title, content);
+  pushTelegramBot(title, content);
+  pushWecomBot(title, content);
+  pushWxPusher(title, content);
 };
 
 // 主流程
@@ -102,43 +154,43 @@ async function main() {
 
     const maskedName = mask(userName, 3, 7);
     try {
-      logger.info(`\n====== 开始处理账号 ${maskedName} ======`);
+      logger.info(`\n🚀 处理账号 ${maskedName}`);
       const client = new CloudClient(userName, password);
       await client.login();
 
-      // 记录首账号初始容量
+      // 初始化首账号容量
       if (!firstAccountInitialized) {
-        const { cloudCapacityInfo, familyCapacityInfo } = await client.getUserSizeInfo();
-        capacityStats.initial.personal = cloudCapacityInfo.availableSize;
-        capacityStats.initial.family = familyCapacityInfo.availableSize;
+        const sizeInfo = await client.getUserSizeInfo();
+        capacityStats.initial.personal = sizeInfo.cloudCapacityInfo.availableSize;
+        capacityStats.initial.family = sizeInfo.familyCapacityInfo.availableSize;
         firstAccountInitialized = true;
       }
 
-      // 执行任务
-      const [taskResults, familyResults] = await Promise.all([
+      // 并行执行任务
+      const [taskRes, familyRes] = await Promise.all([
         doTask(client),
         doFamilyTask(client)
       ]);
 
-      taskResults.forEach(msg => logger.info(msg));
-      familyResults.forEach(msg => logger.info(msg));
+      taskRes.forEach(msg => logger.info(msg));
+      familyRes.forEach(msg => logger.info(msg));
 
       // 更新首账号最终容量
       if (index === 0) {
-        const { cloudCapacityInfo, familyCapacityInfo } = await client.getUserSizeInfo();
-        capacityStats.total.personal = cloudCapacityInfo.availableSize;
-        capacityStats.total.family = familyCapacityInfo.availableSize;
+        const sizeInfo = await client.getUserSizeInfo();
+        capacityStats.total.personal = sizeInfo.cloudCapacityInfo.availableSize;
+        capacityStats.total.family = sizeInfo.familyCapacityInfo.availableSize;
         capacityStats.added.personal = capacityStats.total.personal - capacityStats.initial.personal;
       }
 
     } catch (e) {
-      logger.error(`账号 ${maskedName} 处理失败:`, e.message);
+      logger.error(`处理失败: ${e.message}`);
       if (e.code === "ETIMEDOUT") throw e;
     }
   }
 
   // 生成统计报告
-  const statsTable = `
+  const statsReport = `
 ┌───────────────┬───────────────┬───────────────┐
 │  容量类型     │  初始容量     │  当前容量     │
 ├───────────────┼───────────────┼───────────────┤
@@ -147,11 +199,11 @@ async function main() {
 └───────────────┴───────────────┴───────────────┘
 
 ▎累计新增空间
-  个人云：+${format(capacityStats.added.personal, "M")}（仅统计首账号）
-  家庭云：+${format(capacityStats.added.family, "M")}（累计所有账号）`;
+  个人云：+${format(capacityStats.added.personal, "M")}（仅首账号）
+  家庭云：+${format(capacityStats.added.family, "M")}（全部账号）`;
 
-  logger.info("\n====== 容量统计报告 ======\n" + statsTable);
-  return statsTable;
+  logger.info("\n📊 容量统计报告" + statsReport);
+  return statsReport;
 }
 
 // 执行入口
@@ -159,10 +211,11 @@ async function main() {
   try {
     const report = await main();
     const events = recording.replay();
-    const content = events.map(e => `${e.data.join("")}`).join("\n");
-    push("天翼云盘签到报告", `${content}\n\n${report}`);
+    const content = events.map(e => e.data[0]).join("\n");
+    push("📢 天翼云盘签到报告", `${content}\n\n${report}`);
   } catch (e) {
-    logger.error("主流程执行出错:", e);
+    logger.error("主流程异常:", e.message);
+    push("❌ 任务执行异常", e.message);
   } finally {
     recording.erase();
   }
