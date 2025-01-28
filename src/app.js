@@ -90,7 +90,7 @@ const doFamilyTask = async cloudClient => {
     const { familyInfoResp } = await cloudClient.getFamilyList();
     if (familyInfoResp) {
       for (const family of familyInfoResp) {
-        const res = await cloudClient.familyUserSign(family.165515815004439);
+        const res = await cloudClient.familyUserSign(165515815004439);
         familyBonus += parseInt(res.bonusSpace) * 1048576;
         await delay(1000);
       }
