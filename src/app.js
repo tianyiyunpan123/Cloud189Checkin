@@ -2,6 +2,10 @@
 require("dotenv").config();
 const log4js = require("log4js");
 const recording = require("log4js/lib/appenders/recording");
+const { CloudClient } = require("cloud189-sdk");
+const superagent = require("superagent");
+
+// 日志配置
 log4js.configure({
   appenders: {
     vcr: { type: "recording" },
@@ -11,134 +15,136 @@ log4js.configure({
 });
 
 const logger = log4js.getLogger();
-const superagent = require("superagent");
-const { CloudClient } = require("cloud189-sdk");
-const accounts = require("../accounts");
 
-// 工具函数
-const mask = (s, start, end) => s.split("").fill("*", start, end).join("");
-const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-const bytesToGB = bytes => parseFloat((bytes / 1024 ** 3).toFixed(2));
-
-// 初始化容量报告
-let capacityReport = {
+// 容量统计结构
+const capacityStats = {
   firstAccount: {
-    prePersonal: 0,
-    postPersonal: 0,
-    preFamily: 0,
-    personalBonus: 0
+    initial: { personal: 0, family: 0 },
+    current: { personal: 0, family: 0 }
   },
-  totalFamilyBonus: 0
+  totalAdded: {
+    personal: 0,
+    family: 0
+  }
 };
 
-async function processAccount(account, index) {
-  const { userName, password } = account;
-  const maskedName = mask(userName, 3, 7);
+// 工具函数
+const formatCapacity = (bytes, unit = 'G') => {
+  const units = {
+    G: v => (v / 1024**3).toFixed(2) + 'G',
+    M: v => (v / 1024**2).toFixed(0) + 'M'
+  };
+  return units[unit](bytes).padStart(8);
+};
+
+const buildTable = (stats) => {
+  const header = '┌───────────────┬───────────────┬───────────────┐\n' +
+                 '│  容量类型     │  初始容量     │  当前容量     │\n' +
+                 '├───────────────┼───────────────┼───────────────┤';
+
+  const personalRow = `│ 个人云        │ ${formatCapacity(stats.initial.personal)} │ ${formatCapacity(stats.current.personal)} │`;
+  const familyRow = `│ 家庭云        │ ${formatCapacity(stats.initial.family)} │ ${formatCapacity(stats.current.family)} │`;
   
+  return `${header}\n${personalRow}\n${familyRow}\n` +
+         '└───────────────┴───────────────┴───────────────┘';
+};
+
+// 任务执行模块
+async function executeTasks(client) {
   try {
-    logger.info(`🚀 开始处理账户：${maskedName}`);
-    const cloudClient = new CloudClient(userName, password);
-    
-    // 登录并获取初始容量
-    await cloudClient.login();
-    const preCapacity = await cloudClient.getUserSizeInfo();
-    
-    // 记录首账号初始数据
-    if (index === 0) {
-      capacityReport.firstAccount.prePersonal = bytesToGB(preCapacity.cloudCapacityInfo.totalSize);
-      capacityReport.firstAccount.preFamily = bytesToGB(preCapacity.familyCapacityInfo.totalSize);
-    }
-
-    // 执行任务
-    await Promise.all([
-      performDailyTasks(cloudClient),
-      performFamilyTasks(cloudClient)
-    ]);
-
-    // 获取任务后容量
-    const postCapacity = await cloudClient.getUserSizeInfo();
-    
-    // 计算容量变化
-    const familyBonus = bytesToGB(postCapacity.familyCapacityInfo.totalSize - preCapacity.familyCapacityInfo.totalSize);
-    capacityReport.totalFamilyBonus += familyBonus;
-
-    // 更新首账号数据
-    if (index === 0) {
-      capacityReport.firstAccount.postPersonal = bytesToGB(postCapacity.cloudCapacityInfo.totalSize);
-      capacityReport.firstAccount.personalBonus = bytesToGB(
-        postCapacity.cloudCapacityInfo.totalSize - preCapacity.cloudCapacityInfo.totalSize
-      );
-    }
-
-    logger.info(`✅ ${maskedName} 处理完成，家庭空间新增：${familyBonus}G`);
-
-  } catch (error) {
-    logger.error(`❌ ${maskedName} 处理失败：`, error.message);
-    throw error;
-  }
-}
-
-async function performDailyTasks(client) {
-  try {
-    await client.userSign();    // 签到
+    // 基础任务
+    await client.userSign();
     await delay(3000);
-    await client.taskSign();    // 每日抽奖
+    
+    // 抽奖任务
+    await client.taskSign();
     await delay(3000);
-    await client.taskPhoto();   // 相册抽奖
+    await client.taskPhoto();
+    
+    // 家庭任务
+    const familyTasks = await client.getFamilyList();
+    return Promise.all(familyTasks.map(f => client.familyUserSign(165515815004439);
   } catch (error) {
-    logger.warn("任务执行异常：", error.message);
+    logger.error(`任务执行失败: ${error.message}`);
   }
 }
 
-async function performFamilyTasks(client) {
-  try {
-    const { familyInfoResp } = await client.getFamilyList();
-    if (familyInfoResp) {
-      await Promise.all(familyInfoResp.map(family => 
-        client.familyUserSign(family.165515815004439)
-      ));
+// 容量统计模块
+async function collectCapacityData(client, isFirstAccount) {
+  const sizeInfo = await client.getUserSizeInfo();
+  
+  if (isFirstAccount) {
+    capacityStats.firstAccount.initial = {
+      personal: sizeInfo.cloudCapacityInfo.totalSize,
+      family: sizeInfo.familyCapacityInfo.totalSize
+    };
+  }
+  
+  return {
+    personal: sizeInfo.cloudCapacityInfo.totalSize,
+    family: sizeInfo.familyCapacityInfo.totalSize
+  };
+}
+
+// 推送模块
+async function sendNotification(content) {
+  const channels = [];
+  
+  if (process.env.SERVERCHAN_KEY) {
+    channels.push(sendServerChan(content));
+  }
+  if (process.env.TELEGRAM_BOT_TOKEN) {
+    channels.push(sendTelegram(content));
+  }
+  
+  return Promise.allSettled(channels);
+}
+
+// 主流程
+async function main() {
+  const accounts = JSON.parse(process.env.CLOUD_ACCOUNTS || '[]');
+  
+  for (const [index, account] of accounts.entries()) {
+    try {
+      const client = new CloudClient(account.user, account.pwd);
+      await client.login();
+      
+      const isFirstAccount = index === 0;
+      const initialSize = await collectCapacityData(client, isFirstAccount);
+      
+      await executeTasks(client);
+      
+      const currentSize = await collectCapacityData(client, false);
+      
+      // 累计统计
+      if (isFirstAccount) {
+        capacityStats.totalAdded.personal = currentSize.personal - initialSize.personal;
+        capacityStats.firstAccount.current = currentSize;
+      }
+      
+      capacityStats.totalAdded.family += currentSize.family - initialSize.family;
+      
+    } catch (error) {
+      logger.error(`账户处理失败: ${error.message}`);
     }
-  } catch (error) {
-    logger.warn("家庭任务异常：", error.message);
   }
+
+  // 生成报告
+  const report = [
+    buildTable(capacityStats.firstAccount),
+    '\n▎容量增量统计',
+    `  个人云：+${formatCapacity(capacityStats.totalAdded.personal, 'M')}（仅首账号）`,
+    `  家庭云：+${formatCapacity(capacityStats.totalAdded.family, 'M')}（累计所有账号）`
+  ].join('\n');
+
+  logger.info(report);
+  await sendNotification(report);
 }
 
-function generateCapacityReport() {
-  const { firstAccount, totalFamilyBonus } = capacityReport;
-  const finalFamily = firstAccount.preFamily + totalFamilyBonus;
-
-  return [
-    "📊 ===== 容量变动报告 =====",
-    `首账号（${mask(accounts[0].userName, 3, 7)}）`,
-    "├─ 个人空间",
-    `│   • 初始容量：${firstAccount.prePersonal.toFixed(2)}G`,
-    `│   • 当前容量：${firstAccount.postPersonal.toFixed(2)}G (+${firstAccount.personalBonus.toFixed(2)}G)`,
-    "└─ 家庭空间",
-    `    • 初始容量：${firstAccount.preFamily.toFixed(2)}G`,
-    `    • 累计新增：${totalFamilyBonus.toFixed(2)}G`,
-    `    • 最终容量：${finalFamily.toFixed(2)}G`,
-    "=".repeat(30)
-  ].join("\n");
-}
-
-// 主执行流程
+// 执行入口
 (async () => {
   try {
-    logger.info("🌈 开始执行天翼云盘签到任务");
-    
-    for (let i = 0; i < accounts.length; i++) {
-      await processAccount(accounts[i], i);
-      await delay(5000); // 账号间间隔
-    }
-
-    const report = generateCapacityReport();
-    logger.info("\n" + report);
-
-    // 推送报告（示例用console.log，实际可对接推送渠道）
-    console.log("📩 推送通知：\n" + report);
-
-  } catch (error) {
-    logger.error("‼️ 全局异常：", error.message);
+    await main();
   } finally {
     recording.erase();
   }
