@@ -2,155 +2,268 @@
 require("dotenv").config();
 const log4js = require("log4js");
 const recording = require("log4js/lib/appenders/recording");
+const fs = require("fs");
+const path = require("path");
+
+// 增强日志配置
 log4js.configure({
   appenders: {
     vcr: { type: "recording" },
-    out: { type: "console" }
+    out: { type: "console" },
+    file: { 
+      type: "dateFile",
+      filename: path.join(__dirname, "logs/cloud189"),
+      pattern: "yyyy-MM-dd.log",
+      alwaysIncludePattern: true,
+      compress: true
+    }
   },
-  categories: { default: { appenders: ["vcr", "out"], level: "info" } }
+  categories: { 
+    default: { 
+      appenders: ["vcr", "out", "file"], 
+      level: process.env.DEBUG ? "debug" : "info" 
+    } 
+  }
 });
 
-const logger = log4js.getLogger();
+const logger = log4js.getLogger("main");
 const superagent = require("superagent");
 const { CloudClient } = require("cloud189-sdk");
 const accounts = require("../accounts");
 
-const pushConfig = {
-  serverChan: require("./push/serverChan"),
-  telegramBot: require("./push/telegramBot"),
-  wecomBot: require("./push/wecomBot"),
-  wxpush: require("./push/wxPusher")
-};
+// 创建日志目录
+if (!fs.existsSync(path.join(__dirname, "logs"))) {
+  fs.mkdirSync(path.join(__dirname, "logs"));
+}
 
+// 全局异常处理
+process.on("uncaughtException", (err) => {
+  logger.fatal("未捕获异常:", err);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  logger.error("未处理的Promise拒绝:", reason);
+});
+
+// 工具函数
 const mask = (s, start = 3, end = 7) => 
   s.split("").fill("*", start, end).join("");
 
-// 修改任务函数返回结构
+const buildTaskResult = (res, result) => {
+  const index = result.length + 1;
+  result.push(res.errorCode === "User_Not_Chance" 
+    ? `第${index}次抽奖失败，次数不足`
+    : `第${index}次抽奖成功，获得${res.prizeName}`);
+};
+
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+const safeParseNumber = (val, defaultValue = 0) => {
+  const num = Number(val);
+  return Number.isFinite(num) ? num : defaultValue;
+};
+
+// 任务模块
 const doTask = async (cloudClient) => {
   const result = [];
-  let personalAddMB = 0; // 新增个人容量
+  let personalAddMB = 0;
 
   try {
+    // 用户签到
     const res1 = await cloudClient.userSign();
-    personalAddMB = res1.netdiskBonus; // 捕获签到奖励
-    result.push(`${res1.isSign ? "已签到" : "签到成功"}，获得${res1.netdiskBonus}M空间`);
+    personalAddMB = safeParseNumber(res1.netdiskBonus);
+    result.push(`${res1.isSign ? "已签到" : "签到成功"}，获得${personalAddMB}M空间`);
     await delay(2000);
 
+    // 任务签到
     const res2 = await cloudClient.taskSign();
     buildTaskResult(res2, result);
     await delay(2000);
 
+    // 照片任务
     const res3 = await cloudClient.taskPhoto();
     buildTaskResult(res3, result);
   } catch (e) {
     result.push(`任务执行失败：${e.message}`);
+    logger.error("个人任务异常:", e);
   }
   
-  return { result, personalAddMB }; // 返回结果和新增容量
+  return { result, personalAddMB };
 };
 
-// 修改家庭任务函数
 const doFamilyTask = async (cloudClient) => {
   const results = [];
-  let familyAddMB = 0; // 新增家庭容量
+  let familyAddMB = 0;
 
   try {
     const { familyInfoResp } = await cloudClient.getFamilyList();
     if (familyInfoResp?.length) {
       for (const { familyId } of familyInfoResp) {
-        const res = await cloudClient.familyUserSign(165515815004439);
-        familyAddMB += res.bonusSpace; // 累加家庭奖励
-        results.push(`${res.signStatus ? "已签到" : "签到成功"}，获得${res.bonusSpace}M空间`);
-        await delay(1000);
+        try {
+          const res = await cloudClient.familyUserSign(165515815004439);
+          familyAddMB += safeParseNumber(res.bonusSpace);
+          results.push(`${res.signStatus ? "已签到" : "签到成功"}，获得${res.bonusSpace}M空间`);
+          await delay(1000);
+        } catch (e) {
+          results.push(`家庭组 ${familyId} 签到失败: ${e.message}`);
+        }
       }
     }
   } catch (e) {
     results.push(`家庭任务失败：${e.message}`);
+    logger.error("家庭任务异常:", e);
   }
-  return { results, familyAddMB }; // 返回结果和新增容量
+  return { results, familyAddMB };
 };
 
-// 主流程修改
+// 推送模块
+async function sendNotifications(title, content) {
+  try {
+    // 青龙面板通知
+    if (typeof $ !== "undefined" && $.notify) {
+      await $.notify(title, content);
+    }
+
+    // ServerChan
+    if (process.env.SERVERCHAN_KEY) {
+      await superagent
+        .post(`https://sctapi.ftqq.com/${process.env.SERVERCHAN_KEY}.send`)
+        .timeout(10000)
+        .send({ title, desp: content });
+    }
+
+    // Telegram
+    if (process.env.TG_BOT_TOKEN && process.env.TG_CHAT_ID) {
+      await superagent
+        .post(`https://api.telegram.org/bot${process.env.TG_BOT_TOKEN}/sendMessage`)
+        .timeout(10000)
+        .send({ 
+          chat_id: process.env.TG_CHAT_ID,
+          text: `**${title}**\n\`\`\`\n${content}\n\`\`\``,
+          parse_mode: "Markdown"
+        });
+    }
+
+  } catch (e) {
+    logger.error("推送通知失败:", e);
+  }
+}
+
+// 主流程
 (async () => {
-  const capacityData = [];
-  let totalFamilyAddMB = 0; // 所有账号家庭新增总和
-  const reportLines = ['🏮 天翼云盘任务报告'];
+  const reportLines = ["🏮 天翼云盘任务报告"];
+  let capacityData = [];
+  let totalFamilyAddMB = 0;
 
   try {
+    logger.info("====== 任务开始执行 ======");
+
     for (const [index, account] of accounts.entries()) {
       const { userName, password } = account;
-      if (!userName || !password) continue;
+      if (!userName || !password) {
+        reportLines.push(`⚠ 账户 ${index + 1} 凭证不完整，已跳过`);
+        continue;
+      }
 
       const userMask = mask(userName);
       const accountLog = [];
-      
+      let personalAddMB = 0, familyAddMB = 0;
+
       try {
+        logger.info(`处理账户 ${userMask}`);
         const client = new CloudClient(userName, password);
-        await client.login();
 
-        // 获取任务结果和新增容量
-        const { result: taskResult, personalAddMB } = await doTask(client);
-        const { results: familyResult, familyAddMB } = await doFamilyTask(client);
-        
-        // 获取当前总容量
-        const { cloudCapacityInfo, familyCapacityInfo } = await client.getUserSizeInfo();
-        const personalGB = cloudCapacityInfo.totalSize / (1024 ** 3);
-        const familyGB = familyCapacityInfo.totalSize / (1024 ** 3);
+        // 登录处理
+        try {
+          await client.login();
+          logger.debug(`${userMask} 登录成功`);
+        } catch (e) {
+          accountLog.push(`❌ 登录失败: ${e.message}`);
+          throw e;
+        }
 
-        // 记录容量数据
-        capacityData.push({
-          user: userMask,
-          personalGB,
-          personalAddMB,
-          familyGB,
-          familyAddMB
-        });
+        // 执行任务
+        const taskResult = await doTask(client);
+        personalAddMB = taskResult.personalAddMB;
+        accountLog.push(...taskResult.result);
 
-        // 累计家庭新增
+        const familyResult = await doFamilyTask(client);
+        familyAddMB = familyResult.familyAddMB;
+        accountLog.push(...familyResult.results);
+
+        // 获取容量信息
+        let cloudCapacityInfo, familyCapacityInfo;
+        try {
+          const sizeInfo = await client.getUserSizeInfo();
+          cloudCapacityInfo = sizeInfo.cloudCapacityInfo || {};
+          familyCapacityInfo = sizeInfo.familyCapacityInfo || {};
+        } catch (e) {
+          logger.error("获取容量信息失败:", e);
+          cloudCapacityInfo = { totalSize: 0 };
+          familyCapacityInfo = { totalSize: 0 };
+        }
+
+        // 数据处理
+        const personalGB = safeParseNumber(cloudCapacityInfo.totalSize) / (1024 ** 3);
+        const familyGB = safeParseNumber(familyCapacityInfo.totalSize) / (1024 ** 3);
+        personalAddMB = safeParseNumber(personalAddMB);
+        familyAddMB = safeParseNumber(familyAddMB);
+
+        capacityData.push({ user: userMask, personalGB, personalAddMB, familyGB, familyAddMB });
         totalFamilyAddMB += familyAddMB;
 
-        // 构建日志
-        accountLog.push(...taskResult, ...familyResult);
+        // 账户报告
         accountLog.push(
-          `📊 存储空间 │ 本次获得 ${personalAddMB}M │ 家庭获得 ${familyAddMB}M`,
-          '─'.repeat(40)
+          `📊 容量变动 │ 个人 +${personalAddMB}M │ 家庭 +${familyAddMB}M`,
+          "─".repeat(40)
         );
 
       } catch (e) {
-        accountLog.push(`❌ 账户异常：${e.message}`);
+        accountLog.push(`❌ 处理过程中断: ${e.message}`);
+        logger.error(`账户 ${userMask} 处理失败:`, e);
       } finally {
         reportLines.push(
           `🔐 账户 ${index + 1} │ ${userMask}`,
           ...accountLog.map(l => `  ▪ ${l}`),
-          ''
+          ""
         );
       }
     }
 
-    // 生成新容量汇总表
+    // 生成容量报告
     if (capacityData.length > 0) {
-      const first = capacityData[0];
-      const originalPersonal = (first.personalGB - (first.personalAddMB / 1024)).toFixed(2);
-      const originalFamily = (first.familyGB - (first.familyAddMB / 1024)).toFixed(2);
+      const firstAccount = capacityData[0];
+      const originalPersonal = (firstAccount.personalGB - (firstAccount.personalAddMB / 1024)).toFixed(2);
+      const originalFamily = (firstAccount.familyGB - (firstAccount.familyAddMB / 1024)).toFixed(2);
 
       reportLines.push(
-        '📈 容量汇总',
-        '┌────────────┬───────────────────────────┬───────────────────────────┐',
-        '│  账户名称  │        个人云容量          │        家庭云容量          │',
-        '├────────────┼───────────────────────────┼───────────────────────────┤',
-        `│ ${first.user.padEnd(10)} │ ${originalPersonal} GB (+${first.personalAddMB} M) │ ${originalFamily} GB (+${first.familyAddMB} M) │`,
-        '├────────────┼───────────────────────────┼───────────────────────────┤',
-        `│ ${'总计'.padEnd(10)} │ ${originalPersonal} GB + ${first.personalAddMB} M │ ${originalFamily} GB + ${totalFamilyAddMB} M │`,
-        '└────────────┴───────────────────────────┴───────────────────────────┘'
+        "📈 容量汇总表",
+        "┌────────────┬───────────────────────────┬───────────────────────────┐",
+        "│  账户名称  │        个人云容量          │        家庭云容量          │",
+        "├────────────┼───────────────────────────┼───────────────────────────┤",
+        `│ ${firstAccount.user.padEnd(10)} │ ${originalPersonal} GB (+${firstAccount.personalAddMB} M) │ ${originalFamily} GB (+${firstAccount.familyAddMB} M) │`,
+        "├────────────┼───────────────────────────┼───────────────────────────┤",
+        `│ ${"总计".padEnd(10)} │ ${originalPersonal} GB + ${firstAccount.personalAddMB} M │ ${originalFamily} GB + ${totalFamilyAddMB} M │`,
+        "└────────────┴───────────────────────────┴───────────────────────────┘"
       );
     }
 
   } catch (e) {
-    reportLines.push(`⚠ 系统异常：${e.message}`);
+    reportLines.push(`⚠ 系统级错误: ${e.message}`);
+    logger.fatal("主流程异常:", e);
   } finally {
-    const finalReport = reportLines.join('\n');
+    // 生成最终报告
+    const finalReport = reportLines.join("\n");
     console.log(finalReport);
-    await sendNotifications('天翼云盘签到报告', finalReport);
+    
+    try {
+      await sendNotifications("天翼云盘任务报告", finalReport);
+    } catch (e) {
+      logger.error("推送最终报告失败:", e);
+    }
+
+    logger.info("====== 任务执行结束 ======");
     recording.erase();
   }
 })();
