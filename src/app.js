@@ -20,7 +20,7 @@ const pushConfig = {
   serverChan: require("./push/serverChan"),
   telegramBot: require("./push/telegramBot"),
   wecomBot: require("./push/wecomBot"),
-  wxpush: require("./push/wxPusher")
+  wxpush: require("./push/wxPusher") // 已修复的微信推送模块
 };
 
 // 工具函数
@@ -40,7 +40,6 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const doTask = async (cloudClient) => {
   const result = [];
   let personalAddedMB = 0;
-  let familyAddedMB = 0;
   
   try {
     // 用户签到
@@ -61,7 +60,7 @@ const doTask = async (cloudClient) => {
     result.push(`任务执行失败：${e.message}`);
   }
   
-  return { result, personalAddedMB, familyAddedMB };
+  return { result, personalAddedMB };
 };
 
 const doFamilyTask = async (cloudClient) => {
@@ -71,7 +70,7 @@ const doFamilyTask = async (cloudClient) => {
     const { familyInfoResp } = await cloudClient.getFamilyList();
     if (familyInfoResp?.length) {
       for (const { familyId } of familyInfoResp) {
-        const res = await cloudClient.familyUserSign(165515815004439);
+        const res = await cloudClient.familyUserSign(familyId);
         familyAddedMB += res.bonusSpace || 0;
         results.push(`${res.signStatus ? "已签到" : "签到成功"}，获得${res.bonusSpace}M空间`);
         await delay(1000);
@@ -85,13 +84,35 @@ const doFamilyTask = async (cloudClient) => {
 
 // 通知推送系统
 async function sendNotifications(title, content) {
-  // ...（保持原有推送逻辑不变）...
+  const hasValidPush = Object.values(pushConfig).some(pusher => {
+    const envKeys = Object.keys(process.env);
+    return Object.keys(pusher.requiredEnv || []).every(k => envKeys.includes(k));
+  });
+
+  if (!hasValidPush) {
+    logger.warn("未配置有效推送方式，跳过通知");
+    return;
+  }
+
+  await Promise.all(
+    Object.entries(pushConfig).map(async ([name, pusher]) => {
+      try {
+        if (pusher.requiredEnv?.every(k => process.env[k])) {
+          await pusher.send(title, content);
+          logger.info(`推送成功 (${name})`);
+        }
+      } catch (e) {
+        logger.error(`推送失败 (${name}): ${e.message}`);
+      }
+    })
+  );
 }
 
 // 主执行流程
 (async () => {
   const capacityData = [];
   const reportLines = ['?? 天翼云盘任务报告'];
+  let totalFamilyAddedMB = 0; // 累计所有账号的家庭云新增容量
 
   try {
     for (const [index, account] of accounts.entries()) {
@@ -119,18 +140,16 @@ async function sendNotifications(title, content) {
         personalAddedMB = taskResult.personalAddedMB;
         familyAddedMB = familyResult.familyAddedMB;
 
-        // 获取容量信息
-        const { cloudCapacityInfo, familyCapacityInfo } = await client.getUserSizeInfo();
-        const originalPersonalGB = cloudCapacityInfo.totalSize / (1024 ** 3);
-        const originalFamilyGB = familyCapacityInfo.totalSize / (1024 ** 3);
-        
-        // 仅记录第一个账号的数据
+        // 累计家庭云容量
+        totalFamilyAddedMB += familyAddedMB;
+
+        // 仅记录第一个账号的原始容量
         if (index === 0) {
+          const { cloudCapacityInfo, familyCapacityInfo } = await client.getUserSizeInfo();
           capacityData.push({
-            originalPersonalGB,
-            originalFamilyGB,
-            personalAddedMB,
-            familyAddedMB
+            originalPersonalGB: cloudCapacityInfo.totalSize / (1024 ** 3),
+            originalFamilyGB: familyCapacityInfo.totalSize / (1024 ** 3),
+            personalAddedMB
           });
         }
 
@@ -152,17 +171,11 @@ async function sendNotifications(title, content) {
       }
     }
 
-    // 生成容量汇总表（仅显示第一个账号）
+    // 生成容量汇总表（第一个账号原始数据 + 累计数据）
     if (capacityData.length > 0) {
-      const {
-        originalPersonalGB,
-        originalFamilyGB,
-        personalAddedMB,
-        familyAddedMB
-      } = capacityData[0];
-
-      const totalPersonalGB = originalPersonalGB + (personalAddedMB / 1024);
-      const totalFamilyGB = originalFamilyGB + (familyAddedMB / 1024);
+      const { originalPersonalGB, originalFamilyGB, personalAddedMB } = capacityData[0];
+      const currentPersonalGB = originalPersonalGB + (personalAddedMB / 1024);
+      const currentFamilyGB = originalFamilyGB + (totalFamilyAddedMB / 1024);
 
       reportLines.push(
         '?? 容量汇总',
@@ -171,9 +184,9 @@ async function sendNotifications(title, content) {
         '├──────────────┼───────────────┼───────────────┤',
         `│ 原始容量(GB) │ ${originalPersonalGB.toFixed(2).padStart(12)} │ ${originalFamilyGB.toFixed(2).padStart(12)} │`,
         '├──────────────┼───────────────┼───────────────┤',
-        `│ 新增容量(MB) │ ${personalAddedMB.toString().padStart(12)} │ ${familyAddedMB.toString().padStart(12)} │`,
+        `│ 新增容量(MB) │ ${personalAddedMB.toString().padStart(12)} │ ${totalFamilyAddedMB.toString().padStart(12)} │`,
         '├──────────────┼───────────────┼───────────────┤',
-        `│ 当前总计(GB) │ ${totalPersonalGB.toFixed(2).padStart(12)} │ ${totalFamilyGB.toFixed(2).padStart(12)} │`,
+        `│ 当前总计(GB) │ ${currentPersonalGB.toFixed(2).padStart(12)} │ ${currentFamilyGB.toFixed(2).padStart(12)} │`,
         '└──────────────┴───────────────┴───────────────┘'
       );
     }
