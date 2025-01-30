@@ -20,7 +20,21 @@ log4js.configure({
 });
 
 const logger = log4js.getLogger();
-const accounts = JSON.parse(process.env.CLOUD_ACCOUNTS || "[]");
+
+// ================= 安全账号配置解析 =================
+let accounts = [];
+try {
+  const accountData = process.env.CLOUD_ACCOUNTS || "[]";
+  accounts = JSON.parse(accountData);
+  
+  if (!Array.isArray(accounts)) {
+    logger.error("❌ 配置错误: CLOUD_ACCOUNTS 必须为JSON数组格式");
+    accounts = [];
+  }
+} catch (error) {
+  logger.error("❌ 账号配置解析失败:", error.message);
+  accounts = [];
+}
 
 // ================= 工具函数 =================
 const mask = (s, start = 3, end = 7) => 
@@ -35,7 +49,7 @@ const bytesToUnits = bytes => {
   const mbValue = (bytes % 1024 ** 3) / 1024 ** 2;
   return {
     gb: gbValue >= 0.01 ? parseFloat(gbValue.toFixed(2)) : 0,
-    mb: mbValue >= 1 ? parseFloat(mbValue.toFixed(0)) : 0
+    mb: mbValue >= 1 ? Math.round(mbValue) : 0
   };
 };
 
@@ -55,7 +69,7 @@ const capacityTracker = {
 async function sendWechatNotification(content) {
   const SCKEY = process.env.WECHAT_SCKEY;
   if (!SCKEY) {
-    logger.warn("微信推送未配置，跳过通知");
+    logger.warn("⚠️ 未配置微信推送SCKEY");
     return;
   }
 
@@ -64,15 +78,17 @@ async function sendWechatNotification(content) {
       .post(`https://sctapi.ftqq.com/${SCKEY}.send`)
       .type('form')
       .send({
-        title: "📊 天翼云盘容量报告",
-        desp: content.replace(/\n/g, "\n\n")
+        title: "📊 天翼云盘报告",
+        desp: content.replace(/\n/g, "\n\n") // Server酱需要双换行
       });
 
-    res.body.code === 0 
-      ? logger.info("微信推送成功") 
-      : logger.warn(`推送失败：${res.body.message}`);
+    if (res.body.code === 0) {
+      logger.info("📨 微信推送成功");
+    } else {
+      logger.warn(`❌ 微信推送失败: ${res.body.message}`);
+    }
   } catch (error) {
-    logger.error("微信推送异常：" + error.message);
+    logger.error("💥 微信推送异常:", error.message);
   }
 }
 
@@ -85,10 +101,10 @@ async function executeWithRetry(taskName, taskFn, retries = 3) {
       return true;
     } catch (error) {
       if (i === retries) {
-        logger.error(`❌ ${taskName} 失败：${error.message}`);
+        logger.error(`❌ ${taskName} 失败: ${error.message}`);
         return false;
       }
-      logger.warn(`⚠️ ${taskName} 重试中 (${i}/${retries})`);
+      logger.warn(`🔄 ${taskName} 重试中 (${i}/${retries})`);
       await delay(2000 * i);
     }
   }
@@ -112,7 +128,7 @@ async function performFamilyTasks(client) {
     for (const family of familyInfoResp) {
       const familyId = family.familyId;
       if (capacityTracker.processedFamilies.has(familyId)) {
-        logger.info(`⏩ 已处理家庭 ${familyId}`);
+        logger.info(`⏩ 跳过已处理家庭 ${familyId}`);
         continue;
       }
 
@@ -127,7 +143,7 @@ async function performFamilyTasks(client) {
       }
     }
   } catch (error) {
-    logger.error("家庭任务初始化失败：" + error.message);
+    logger.error("💥 家庭任务初始化失败:", error.message);
   }
 }
 
@@ -139,13 +155,13 @@ async function processAccount(account, index) {
 
   try {
     client = new CloudClient(userName, password);
-    logger.info(`🔐 ${maskedName} 登录中...`);
+    logger.info(`🔑 ${maskedName} 登录中...`);
 
     // 登录认证
     await executeWithRetry("账号登录", () => client.login());
     logger.info(`🚀 ${maskedName} 登录成功`);
 
-    // 初始容量记录（保持GB单位）
+    // 初始容量记录
     const preCapacity = await client.getUserSizeInfo();
     if (index === 0) {
       capacityTracker.firstAccount.prePersonalGB = bytesToUnits(preCapacity.cloudCapacityInfo.totalSize).gb;
@@ -173,9 +189,9 @@ async function processAccount(account, index) {
       capacityTracker.firstAccount.personalBonus = personalBonus;
     }
 
-    logger.info(`🎯 ${maskedName} 处理完成，新增：${formatCapacity(familyBonus)}`);
+    logger.info(`🎉 ${maskedName} 处理完成，家庭新增：${formatCapacity(familyBonus)}`);
   } catch (error) {
-    logger.error(`💥 ${maskedName} 处理失败：${error.message}`);
+    logger.error(`💥 ${maskedName} 处理失败: ${error.message}`);
     throw error;
   } finally {
     await delay(3000);
@@ -201,12 +217,11 @@ function generateCapacityReport() {
     totalFamilyBonus
   } = capacityTracker;
 
-  // 最终家庭容量（GB单位）
   const finalFamilyGB = preFamilyGB + totalFamilyBonus.gb;
 
   return [
     "📊 ====== 容量报告 ======",
-    `主账号：${mask(accounts[0]?.userName)}`,
+    `主账号：${mask(accounts[0]?.userName || "")}`,
     "├─ 个人空间",
     `│   • 初始：${prePersonalGB.toFixed(2)}GB`,
     `│   • 当前：${postPersonalGB.toFixed(2)}GB (+${formatCapacity(personalBonus)})`,
@@ -222,8 +237,15 @@ function generateCapacityReport() {
 (async () => {
   try {
     logger.info("🚀 启动天翼云盘自动化任务");
-    logger.info(`📁 检测到 ${accounts.length} 个账号`);
+    
+    // 账号列表验证
+    if (!accounts.length) {
+      logger.error("‼️ 错误：未检测到有效账号配置");
+      process.exit(1);
+    }
 
+    logger.info(`📁 检测到 ${accounts.length} 个账号`);
+    
     for (let i = 0; i < accounts.length; i++) {
       await processAccount(accounts[i], i);
     }
