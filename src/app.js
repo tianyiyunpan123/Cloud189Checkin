@@ -15,44 +15,22 @@ log4js.configure({
 });
 
 const logger = log4js.getLogger();
-// process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0'
-const superagent = require("superagent");
 const { CloudClient } = require("cloud189-sdk");
-const serverChan = require("./push/serverChan");
-const telegramBot = require("./push/telegramBot");
-const wecomBot = require("./push/wecomBot");
-const wxpush = require("./push/wxPusher");
 const accounts = require("../accounts");
 
 const mask = (s, start, end) => s.split("").fill("*", start, end).join("");
 
-const buildTaskResult = (res, result) => {
-  const index = result.length;
-  if (res.errorCode === "User_Not_Chance") {
-    result.push(`第${index}次抽奖失败,次数不足`);
-  } else {
-    result.push(`第${index}次抽奖成功,抽奖获得${res.prizeName}`);
-  }
-};
-
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// 任务 1.签到 2.天天抽红包 3.自动备份抽红包
+// 简化后的任务：仅保留个人和家庭签到
 const doTask = async (cloudClient) => {
   const result = [];
-  const res1 = await cloudClient.userSign();
+  // 个人签到
+  const res = await cloudClient.userSign();
   result.push(
-    `${res1.isSign ? "已经签到过了，" : ""}签到获得${res1.netdiskBonus}M空间`
+    `${res.isSign ? "已经签到过了，" : ""}个人签到获得${res.netdiskBonus}M空间`
   );
-  await delay(5000); // 延迟5秒
-
-  const res2 = await cloudClient.taskSign();
-  buildTaskResult(res2, result);
-
-  await delay(5000); // 延迟5秒
-  const res3 = await cloudClient.taskPhoto();
-  buildTaskResult(res3, result);
-
+  await delay(2000);
   return result;
 };
 
@@ -60,127 +38,90 @@ const doFamilyTask = async (cloudClient) => {
   const { familyInfoResp } = await cloudClient.getFamilyList();
   const result = [];
   if (familyInfoResp) {
-    for (let index = 0; index < familyInfoResp.length; index += 1) {
-      const { familyId } = familyInfoResp[index];
-      const res = await cloudClient.familyUserSign(165515815004439);
+    for (const family of familyInfoResp) {
+      const res = await cloudClient.familyUserSign(family.165515815004439);
       result.push(
-        "家庭任务" +
-          `${res.signStatus ? "已经签到过了，" : ""}签到获得${
-            res.bonusSpace
-          }M空间`
+        `家庭[${family.familyName}]签到${
+          res.signStatus ? "已存在，" : "成功，"
+        }获得${res.bonusSpace}M空间`
       );
+      await delay(2000);
     }
   }
   return result;
 };
 
-// ... [保持原有的推送函数不变，此处省略以节省篇幅]
-
-// 修改后的主执行函数
 async function main() {
-  // 初始化全局汇总数据
-  global.summaryData = null;
+  global.summaryData = {
+    personal: { original: 0, add: 0 },
+    family: { original: 0, add: 0 }
+  };
 
-  for (let index = 0; index < accounts.length; index += 1) {
-    const account = accounts[index];
-    const { userName, password } = account;
-    if (userName && password) {
-      const userNameInfo = mask(userName, 3, 7);
-      try {
-        logger.log(`\n账户 ${userNameInfo}开始执行`);
-        const cloudClient = new CloudClient(userName, password);
-        await cloudClient.login();
-        
-        // 执行任务
-        const result = await doTask(cloudClient);
-        result.forEach((r) => logger.log(r));
-        
-        // 执行家庭任务
-        const familyResult = await doFamilyTask(cloudClient);
-        familyResult.forEach((r) => logger.log(r));
+  for (let i = 0; i < accounts.length; i++) {
+    const { userName, password } = accounts[i];
+    if (!userName || !password) continue;
 
-        // 容量信息处理（新增部分）
-        const { cloudCapacityInfo, familyCapacityInfo } =
-          await cloudClient.getUserSizeInfo();
+    const maskedName = mask(userName, 3, 7);
+    try {
+      logger.info(`\n🔒 正在处理账号 ${maskedName}`);
+      const client = new CloudClient(userName, password);
+      await client.login();
 
-        // 仅处理第一个账号的原始容量
-        if (index === 0) {
-          const originalPersonalGB = (
-            cloudCapacityInfo.totalSize /
-            1024 /
-            1024 /
-            1024
-          ).toFixed(2);
-          const originalFamilyGB = (
-            familyCapacityInfo.totalSize /
-            1024 /
-            1024 /
-            1024
-          ).toFixed(2);
+      // 执行个人签到
+      const personalResult = await doTask(client);
+      personalResult.forEach(logger.info);
 
-          // 提取签到获得的M数
-          const signBonusMatch = result.find((r) => r.includes("签到获得"))?.match(/\d+/);
-          const signBonusM = signBonusMatch ? signBonusMatch[0] : 0;
+      // 执行家庭签到
+      const familyResult = await doFamilyTask(client);
+      familyResult.forEach(logger.info);
 
-          // 计算家庭云新增
-          const familyBonusM = familyResult.reduce((sum, r) => {
-            const match = r.match(/\d+/);
-            return sum + (match ? Number(match[0]) : 0);
-          }, 0);
+      // 获取容量信息
+      const { cloudCapacityInfo, familyCapacityInfo } = await client.getUserSizeInfo();
 
-          // 初始化汇总数据
-          if (!global.summaryData) {
-            global.summaryData = {
-              personal: {
-                original: originalPersonalGB,
-                add: 0
-              },
-              family: {
-                original: originalFamilyGB,
-                add: 0
-              }
-            };
-          }
-
-          // 累计数据
-          global.summaryData.personal.add += Number(signBonusM);
-          global.summaryData.family.add += familyBonusM;
-        }
-
-      } catch (e) {
-        logger.error(e);
-        if (e.code === "ETIMEDOUT") {
-          throw e;
-        }
-      } finally {
-        logger.log(`账户 ${userNameInfo}执行完毕`);
+      // 记录第一个账号的原始容量
+      if (i === 0) {
+        global.summaryData.personal.original = (cloudCapacityInfo.totalSize / 1024 ** 3).toFixed(2);
+        global.summaryData.family.original = (familyCapacityInfo.totalSize / 1024 ** 3).toFixed(2);
       }
+
+      // 累计容量增量
+      const personalAdd = personalResult.reduce((sum, r) => sum + (/\d+/.exec(r)?.[0] || 0), 0);
+      const familyAdd = familyResult.reduce((sum, r) => sum + (/\d+/.exec(r)?.[0] || 0), 0);
+      
+      global.summaryData.personal.add += personalAdd;
+      global.summaryData.family.add += familyAdd;
+
+    } catch (e) {
+      logger.error(`❌ 账号 ${maskedName} 处理失败:`, e.message);
+    } finally {
+      logger.info(`✅ 账号 ${maskedName} 处理完成\n${"-".repeat(30)}`);
     }
   }
 
-  // 添加汇总信息到推送内容（新增部分）
-  if (global.summaryData) {
-    logger.log(`
-📊 容量汇总
-──────────────
-个人云原容量：${global.summaryData.personal.original}G
-本次签到新增：+${global.summaryData.personal.add}M
-──────────────
-家庭云原容量：${global.summaryData.family.original}G
-累计新增容量：+${global.summaryData.family.add}M
-──────────────
-（多个账号时家庭云容量会累计所有账号的新增空间）`);
-  }
+  // 生成汇总报告
+  logger.info(`
+📊 容量变动汇总
+────────────────────────
+个人云 | 原容量: ${global.summaryData.personal.original}G
+       | 本次新增: +${global.summaryData.personal.add}M
+────────────────────────
+家庭云 | 原容量: ${global.summaryData.family.original}G
+       | 累计新增: +${global.summaryData.family.add}M
+────────────────────────
+注：多个账号时家庭云容量会累计所有账号的签到奖励`);
+
+  return global.summaryData;
 }
 
-// ... [保持原有的自执行函数不变]
+// 执行并推送结果
 (async () => {
   try {
     await main();
   } finally {
     const events = recording.replay();
-    const content = events.map((e) => `${e.data.join("")}`).join("  \n");
-    push("天翼云盘自动签到任务", content);
+    const content = events.map(e => e.data[0]).join("\n");
+    // 这里调用你的推送函数（示例保留推送结构）
+    console.log("\n📨 推送内容：\n" + content);
     recording.erase();
   }
 })();
