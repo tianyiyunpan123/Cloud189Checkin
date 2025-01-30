@@ -1,170 +1,276 @@
 /* eslint-disable no-await-in-loop */
 require("dotenv").config();
 const log4js = require("log4js");
-const recording = require("log4js/lib/appenders/recording");
-log4js.configure({
-  appenders: {
-    vcr: { type: "recording" },
-    out: { type: "console" }
-  },
-  categories: { default: { appenders: ["vcr", "out"], level: "info" } }
-});
-
-const logger = log4js.getLogger();
-const superagent = require("superagent");
+const { exec } = require("child_process");
 const { CloudClient } = require("cloud189-sdk");
+const superagent = require("superagent");
 const accounts = require("../accounts");
 
-// 微信推送配置
-const { wxpush } = require("./push/config");
+// 日志配置
+log4js.configure({
+  appenders: {
+    file: {
+      type: "file",
+      filename: "cloud189.log",
+      maxLogSize: 10 * 1024 * 1024, // 10MB
+      backups: 3
+    },
+    console: { type: "console" }
+  },
+  categories: {
+    default: {
+      appenders: ["file", "console"],
+      level: process.env.NODE_ENV === "production" ? "info" : "debug"
+    }
+  }
+});
 
-// 智能掩码处理
-const mask = (s) => {
-  if (s.length <= 4) return s[0] + '*'.repeat(s.length - 2) + s.slice(-1);
-  return s.slice(0, 2) + '*'.repeat(s.length - 4) + s.slice(-2);
-};
+const logger = log4js.getLogger("main");
 
-// 系统延迟
-const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+// 安全执行子进程（带重试和超时）
+async function safeExec(command, options = {}) {
+  const maxRetries = options.retries || 3;
+  const timeout = options.timeout || 30000;
+  let attempt = 1;
 
-// 微信消息推送
-async function wechatPush(content) {
-  if (!wxpush.appToken || !wxpush.uid) return;
-  
-  try {
-    await superagent.post("https://wxpusher.zjiecode.com/api/send/message")
-      .send({
-        appToken: wxpush.appToken,
-        contentType: 3,  // 使用Markdown格式
-        content: `
-          ## 🗂️ 天翼云盘容量报告  
-          ${content}
-        `,
-        uids: [wxpush.uid]
+  while (attempt <= maxRetries) {
+    try {
+      logger.debug(`执行命令: ${command} (尝试 ${attempt}/${maxRetries})`);
+      
+      return await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error(`命令执行超时 (${timeout}ms)`));
+        }, timeout);
+
+        const child = exec(command, {
+          ...options,
+          env: { ...process.env, ...options.env }
+        }, (error, stdout, stderr) => {
+          clearTimeout(timer);
+          if (error) {
+            error.stderr = stderr;
+            return reject(error);
+          }
+          resolve({ stdout: stdout.trim(), stderr: stderr.trim() });
+        });
+
+        // 实时日志输出
+        child.stdout.on("data", data => {
+          data.toString().split('\n').forEach(line => {
+            if (line) logger.debug(`[子进程输出] ${line}`);
+          });
+        });
+
+        child.stderr.on("data", data => {
+          data.toString().split('\n').forEach(line => {
+            if (line) logger.error(`[子进程错误] ${line}`);
+          });
+        });
       });
-    logger.info("微信推送成功");
-  } catch (e) {
-    logger.error("微信推送失败:", e);
+    } catch (error) {
+      logger.error(`尝试 ${attempt} 失败: ${error.message}`);
+      if (attempt === maxRetries) throw error;
+      
+      await new Promise(res => setTimeout(res, 2000 ** attempt));
+      attempt++;
+    }
   }
 }
 
-// 新版任务执行器
-class TaskExecutor {
-  constructor(client) {
-    this.client = client;
-    this.personalAdd = 0;
-    this.familyAdd = 0;
-    this.logs = [];
+// 增强登录流程
+async function safeLogin(client) {
+  try {
+    await client.login();
+    return true;
+  } catch (error) {
+    if (error.message.includes("CAPTCHA")) {
+      logger.warn("检测到验证码要求，尝试自动处理...");
+      
+      // 执行验证码处理脚本
+      await safeExec("python3 scripts/captcha_solver.py", {
+        cwd: __dirname,
+        env: { 
+          PHANTOMJS_PATH: process.env.PHANTOMJS_PATH,
+          DEBUG_MODE: process.env.DEBUG_MODE 
+        },
+        retries: 2
+      });
+      
+      logger.info("验证码处理完成，重试登录...");
+      return safeLogin(client);
+    }
+    throw error;
+  }
+}
+
+// 微信推送模块
+async function wechatPush(content) {
+  if (!process.env.WXPUSHER_TOKEN || !process.env.WXPUSHER_UID) return;
+
+  try {
+    const res = await superagent
+      .post("https://wxpusher.zjiecode.com/api/send/message")
+      .send({
+        appToken: process.env.WXPUSHER_TOKEN,
+        contentType: 3, // Markdown格式
+        content: `## 🗂️ 天翼云盘执行报告\n\`\`\`\n${content}\n\`\`\``,
+        uids: [process.env.WXPUSHER_UID]
+      });
+
+    if (res.body.code === 1000) {
+      logger.info("微信推送成功");
+    } else {
+      logger.warn("微信推送异常:", res.body.msg);
+    }
+  } catch (error) {
+    logger.error("微信推送失败:", error.message);
+  }
+}
+
+// 核心任务执行类
+class CloudTaskExecutor {
+  constructor(username, password) {
+    this.client = new CloudClient(username, password);
+    this.maskedName = this.maskUsername(username);
+    this.stats = {
+      personal: { original: 0, added: 0 },
+      family: { original: 0, added: 0 }
+    };
   }
 
-  async execute() {
+  maskUsername(username) {
+    if (username.length <= 4) return username[0] + '*'.repeat(username.length - 1);
+    return username.slice(0, 2) + '*'.repeat(username.length - 4) + username.slice(-2);
+  }
+
+  async initialize() {
+    // 环境检查
+    await safeExec("node --version", {
+      validation: stdout => {
+        const ver = stdout.match(/v(\d+\.\d+)/)[1];
+        if (parseFloat(ver) < 14) throw new Error("需要Node.js 14+");
+      }
+    });
+
+    await safeLogin(this.client);
+    const capacity = await this.client.getUserSizeInfo();
+    
+    this.stats.personal.original = capacity.cloudCapacityInfo.totalSize / (1024 ** 3);
+    this.stats.family.original = capacity.familyCapacityInfo.totalSize / (1024 ** 3);
+  }
+
+  async executeTasks() {
     try {
       // 每日签到
       const signRes = await this.client.userSign();
-      this.personalAdd = signRes.netdiskBonus || 0;
-      this.logs.push(`${signRes.isSign ? "🔄" : "✅"} 个人签到 +${this.personalAdd}M`);
-      await delay(1500);
+      this.stats.personal.added = signRes.netdiskBonus || 0;
+      logger.info(`签到成功: +${this.stats.personal.added}M`);
 
       // 家庭任务
       const { familyInfoResp } = await this.client.getFamilyList();
       if (familyInfoResp) {
         for (const family of familyInfoResp) {
           const res = await this.client.familyUserSign(family.165515815004439);
-          this.familyAdd += res.bonusSpace || 0;
-          this.logs.push(`🏠 家庭签到 +${res.bonusSpace}M`);
+          this.stats.family.added += res.bonusSpace || 0;
           await delay(1000);
         }
       }
-    } catch (e) {
-      this.logs.push(`❌ 错误: ${e.message}`);
+
+      return true;
+    } catch (error) {
+      logger.error(`任务执行失败: ${error.message}`);
+      return false;
     }
-    return this;
+  }
+
+  generateReport() {
+    const totalPersonal = this.stats.personal.original + (this.stats.personal.added / 1024);
+    const totalFamily = this.stats.family.original + (this.stats.family.added / 1024);
+
+    return `
+账户标识: ${this.maskedName}
+┌──────────────┬───────────────┬───────────────┐
+│  空间类型    │  原始容量     │  当前总量     │
+├──────────────┼───────────────┼───────────────┤
+│ 个人空间     │ ${this.stats.personal.original.toFixed(2).padStart(6)} GB  │ ${totalPersonal.toFixed(2).padStart(6)} GB  │
+│ 家庭空间     │ ${this.stats.family.original.toFixed(2).padStart(6)} GB  │ ${totalFamily.toFixed(2).padStart(6)} GB  │
+└──────────────┴───────────────┴───────────────┘
+新增统计:
+  • 个人空间: +${this.stats.personal.added} MB
+  • 家庭空间: +${this.stats.family.added} MB
+    `.trim();
   }
 }
 
-// 主处理流程
+// 主执行流程
 async function main() {
-  let firstAccount = null;
-  let totalFamilyAdd = 0;
-
-  for (const [index, account] of accounts.entries()) {
-    const { userName, password } = account;
-    if (!userName || !password) continue;
-
-    recording.start();
-    const maskedName = mask(userName);
-    logger.info(`\n🚀 处理账户 ${index + 1}/${accounts.length}: ${maskedName}`);
-
-    try {
-      // 初始化客户端
-      const client = new CloudClient(userName, password);
-      await client.login();
-
-      // 获取原始容量
-      const { cloudCapacityInfo, familyCapacityInfo } = await client.getUserSizeInfo();
-      const originalPersonal = cloudCapacityInfo.totalSize / (1024 ** 3);
-      const originalFamily = familyCapacityInfo.totalSize / (1024 ** 3);
-
-      // 执行任务
-      const executor = await new TaskExecutor(client).execute();
-      logger.info(executor.logs.join(" | "));
-
-      // 记录首个账户数据
-      if (index === 0) {
-        firstAccount = {
-          name: maskedName,
-          original: {
-            personal: originalPersonal,
-            family: originalFamily
-          },
-          add: {
-            personal: executor.personalAdd,
-            family: executor.familyAdd
-          }
-        };
-      }
-
-      // 累计所有账户的家庭新增
-      totalFamilyAdd += executor.familyAdd;
-
-    } catch (e) {
-      logger.error(`账户处理失败: ${e.message}`);
-    } finally {
-      recording.erase();
+  try {
+    if (!accounts.length) {
+      logger.warn("未配置有效账户");
+      return;
     }
-  }
 
-  // 生成专业报告
-  if (firstAccount) {
-    // 计算总计
-    const finalPersonal = firstAccount.original.personal + (firstAccount.add.personal / 1024);
-    const finalFamily = firstAccount.original.family + (totalFamilyAdd / 1024);
+    let totalFamilyAdded = 0;
+    const reports = [];
 
-    // 构建专业表格
-    const report = `
-| 项目        | 个人空间               | 家庭空间               |
-|-------------|------------------------|------------------------|
-| 原容量      | ${firstAccount.original.personal.toFixed(2).padStart(6)} GB      | ${firstAccount.original.family.toFixed(2).padStart(6)} GB      |
-| 本次新增    | ${firstAccount.add.personal.toString().padStart(6)} MB      | ${totalFamilyAdd.toString().padStart(6)} MB      |
-| 当前总计    | ${finalPersonal.toFixed(2).padStart(6)} GB      | ${finalFamily.toFixed(2).padStart(6)} GB      |
+    for (const [index, account] of accounts.entries()) {
+      const executor = new CloudTaskExecutor(account.userName, account.password);
+      
+      try {
+        logger.info(`\n=== 处理账户 ${index + 1}/${accounts.length} ===`);
+        await executor.initialize();
+        
+        if (await executor.executeTasks()) {
+          reports.push(executor.generateReport());
+          
+          // 累计家庭空间（所有账户）
+          totalFamilyAdded += executor.stats.family.added;
+          
+          // 首个账户详细报告
+          if (index === 0) {
+            await wechatPush(executor.generateReport());
+          }
+        }
+      } catch (error) {
+        logger.error(`账户处理中断: ${error.message}`);
+        await wechatPush(`❌ 账户处理异常: ${error.message}`);
+      }
+    }
 
-🔖 统计说明：
-1. 个人空间数据来自首个账户：${firstAccount.name}
-2. 家庭空间新增累计所有账户签到结果
-3. 转换率：1 GB = 1024 MB`.trim();
+    // 生成全局汇总报告
+    if (reports.length) {
+      const summary = `
+=== 全局统计 ===
+累计家庭空间新增: ${totalFamilyAdded} MB
+等效容量增加: ${(totalFamilyAdded / 1024).toFixed(2)} GB
 
-    logger.info("\n" + report);
-    await wechatPush(`\`\`\`\n${report}\n\`\`\``);
+=== 详细报告 ===
+${reports.join('\n\n')}
+      `.trim();
+
+      logger.info(summary);
+      await wechatPush(summary);
+    }
+
+  } catch (error) {
+    logger.fatal("主流程异常:", error);
+    await wechatPush(`‼️ 系统级错误: ${error.message}`);
+    process.exit(1);
   }
 }
 
-// 安全启动
-(async () => {
-  try {
-    await main();
-    logger.info("✅ 所有任务处理完成");
-  } catch (e) {
-    logger.error("‼️ 全局错误:", e);
-    await wechatPush(`⚠️ 系统异常: ${e.message}`);
-  }
-})();
+// 全局错误处理
+process
+  .on("unhandledRejection", reason => {
+    logger.error("未处理的Promise拒绝:", reason);
+    process.exitCode = 1;
+  })
+  .on("uncaughtException", error => {
+    logger.fatal("未捕获的异常:", error);
+    process.exitCode = 1;
+  });
+
+// 启动执行
+main()
+  .then(() => logger.info("所有任务处理完成"))
+  .catch(() => process.exit(1));
