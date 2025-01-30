@@ -1,162 +1,242 @@
+/* eslint-disable no-await-in-loop */
+require("dotenv").config();
+const log4js = require("log4js");
+const recording = require("log4js/lib/appenders/recording");
+const superagent = require("superagent");
 const { CloudClient } = require("cloud189-sdk");
 
-// 敏感信息掩码工具
-const mask = (s, start = 3, end = 7) => s.split("").fill("*", start, end).join("");
+// ================= 初始化配置 =================
+log4js.configure({
+  appenders: {
+    vcr: { type: "recording" },
+    out: { type: "console" }
+  },
+  categories: { 
+    default: { 
+      appenders: ["vcr", "out"], 
+      level: process.env.LOG_LEVEL || "info" 
+    } 
+  }
+});
 
-// 容量统计相关
-const capacityDetails = [];
-const message = [];
+const logger = log4js.getLogger();
+const accounts = JSON.parse(process.env.CLOUD_ACCOUNTS || "[]");
 
-// 构建抽奖结果
-const buildTaskResult = (res, result) => {
-  const index = result.length + 1;
-  result.push(
-    res.errorCode === "User_Not_Chance" 
-      ? `第${index}次抽奖失败，次数不足` 
-      : `第${index}次抽奖成功，获得 ${res.prizeName}`
-  );
+// ================= 工具函数 =================
+const mask = (s, start = 3, end = 7) => 
+  s.length > start + end 
+    ? `${s.slice(0, start)}${"*".repeat(end - start)}${s.slice(-end)}`
+    : s;
+
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+const bytesToUnits = bytes => {
+  const gbValue = bytes / 1024 ** 3;
+  const mbValue = (bytes % 1024 ** 3) / 1024 ** 2;
+  return {
+    gb: gbValue >= 0.01 ? parseFloat(gbValue.toFixed(2)) : 0,
+    mb: mbValue >= 1 ? parseFloat(mbValue.toFixed(0)) : 0
+  };
 };
 
-// 延迟函数
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+// ================= 容量追踪器 =================
+const capacityTracker = {
+  firstAccount: {
+    prePersonalGB: 0,
+    postPersonalGB: 0,
+    preFamilyGB: 0,
+    personalBonus: { gb: 0, mb: 0 }
+  },
+  totalFamilyBonus: { gb: 0, mb: 0 },
+  processedFamilies: new Set()
+};
 
-// 核心任务逻辑
-const doTask = async cloudClient => {
-  const result = [];
-  
-  // 个人签到
-  const res1 = await cloudClient.userSign();
-  result.push(`${res1.isSign ? "已签到" : "签到成功"}，获得 ${res1.netdiskBonus}M 空间`);
-  
-  // 抽奖任务
-  const lotteryTasks = [
-    cloudClient.taskSign(),
-    cloudClient.taskPhoto(),
-    cloudClient.taskKJ()
-  ];
-
-  for (let i = 0; i < lotteryTasks.length; i++) {
-    await delay(5000);
-    buildTaskResult(await lotteryTasks[i], result);
+// ================= 微信推送模块 =================
+async function sendWechatNotification(content) {
+  const SCKEY = process.env.WECHAT_SCKEY;
+  if (!SCKEY) {
+    logger.warn("微信推送未配置，跳过通知");
+    return;
   }
 
-  return result;
-};
-
-// 家庭空间任务
-const doFamilyTask = async cloudClient => {
-  const result = [];
   try {
-    const { familyInfoResp } = await cloudClient.getFamilyList();
-    
-    if (familyInfoResp?.length) {
-      for (const { familyId } of familyInfoResp) {
-        const res = await cloudClient.familyUserSign(String(165515815004439));
-        result.push(
-          `家庭空间${String(familyId).slice(-4)}：${res.signStatus ? "已签到" : "签到成功"}，获得 ${res.bonusSpace}M 空间`
-        );
-      }
-    } else {
-      result.push("未找到家庭空间信息");
-    }
-  } catch (e) {
-    result.push(`家庭空间任务异常：${e.message}`);
-  }
-  return result;
-};
+    const res = await superagent
+      .post(`https://sctapi.ftqq.com/${SCKEY}.send`)
+      .type('form')
+      .send({
+        title: "📊 天翼云盘容量报告",
+        desp: content.replace(/\n/g, "\n\n")
+      });
 
-// 主执行函数
-async function main(userName, password) {
-  const userNameInfo = mask(userName);
-  try {
-    message.push(`\n账号 ${userNameInfo} 开始执行`);
-    const cloudClient = new CloudClient(userName, password);
-
-    if (!await cloudClient.login()) {
-      message.push(`账号 ${userNameInfo} 登录失败`);
-      return;
-    }
-
-    // 并行执行任务
-    const [taskResult, familyResult] = await Promise.all([
-      doTask(cloudClient),
-      doFamilyTask(cloudClient)
-    ]);
-
-    // 记录任务结果
-    message.push(...taskResult, ...familyResult);
-
-    // 收集容量数据
-    const { cloudCapacityInfo, familyCapacityInfo } = await cloudClient.getUserSizeInfo();
-    
-    // 计算新增容量
-    const personalAddedMB = taskResult
-      .filter(item => item.includes("获得") && item.includes("M"))
-      .reduce((sum, item) => sum + parseInt((item.match(/(\d+)M/) || [0,0])[1]), 0);
-
-    const familyAddedMB = familyResult
-      .filter(item => item.includes("获得") && item.includes("M"))
-      .reduce((sum, item) => sum + parseInt((item.match(/(\d+)M/) || [0,0])[1]), 0);
-
-    // 存储容量信息
-    capacityDetails.push({
-      userNameInfo,
-      originalPersonalGB: (cloudCapacityInfo?.usedSize || 0) / 1024**3,
-      originalFamilyGB: (familyCapacityInfo?.usedSize || 0) / 1024**3,
-      personalAddedMB,
-      familyAddedMB
-    });
-
-    message.push(`当前容量：个人 ${(cloudCapacityInfo.totalSize / 1024**3).toFixed(2)}G | 家庭 ${(familyCapacityInfo.totalSize / 1024**3).toFixed(2)}G`);
-
-  } catch (e) {
-    message.push(`账号 ${userNameInfo} 执行异常：${e.message}`);
-  } finally {
-    message.push(`账号 ${userNameInfo} 执行完毕`);
+    res.body.code === 0 
+      ? logger.info("微信推送成功") 
+      : logger.warn(`推送失败：${res.body.message}`);
+  } catch (error) {
+    logger.error("微信推送异常：" + error.message);
   }
 }
 
-// 程序入口
-(async () => {
-  try {
-    const c189s = process.env.CLOUD_189?.split('\n') || [];
-    
-    if (!c189s.length) {
-      message.push("未配置环境变量 CLOUD_189");
-      return;
+// ================= 任务执行器 =================
+async function executeWithRetry(taskName, taskFn, retries = 3) {
+  for (let i = 1; i <= retries; i++) {
+    try {
+      await taskFn();
+      logger.info(`✅ ${taskName} 成功`);
+      return true;
+    } catch (error) {
+      if (i === retries) {
+        logger.error(`❌ ${taskName} 失败：${error.message}`);
+        return false;
+      }
+      logger.warn(`⚠️ ${taskName} 重试中 (${i}/${retries})`);
+      await delay(2000 * i);
     }
+  }
+}
 
-    // 遍历执行所有账号
-    for (const account of c189s) {
-      const [username, password] = account.split('|');
-      if (username?.trim() && password?.trim()) {
-        await main(username.trim(), password.trim());
-        await delay(3000);
+async function performDailyTasks(client) {
+  await executeWithRetry("每日签到", () => client.userSign());
+  await delay(1500);
+  
+  await executeWithRetry("每日抽奖", () => client.taskSign());
+  await delay(1500);
+  
+  await executeWithRetry("相册抽奖", () => client.taskPhoto());
+}
+
+async function performFamilyTasks(client) {
+  try {
+    const { familyInfoResp } = await client.getFamilyList();
+    if (!familyInfoResp?.length) return;
+
+    for (const family of familyInfoResp) {
+      const familyId = family.familyId;
+      if (capacityTracker.processedFamilies.has(familyId)) {
+        logger.info(`⏩ 已处理家庭 ${familyId}`);
+        continue;
+      }
+
+      const success = await executeWithRetry(
+        `家庭签到 ${familyId}`,
+        () => client.familyUserSign(165515815004439)
+      );
+      
+      if (success) {
+        capacityTracker.processedFamilies.add(familyId);
+        await delay(1000);
       }
     }
+  } catch (error) {
+    logger.error("家庭任务初始化失败：" + error.message);
+  }
+}
 
-    // 生成容量汇总表
-    if (capacityDetails.length) {
-      const firstAccount = capacityDetails[0];
-      const totalFamilyAddedMB = capacityDetails.reduce((sum, cur) => sum + cur.familyAddedMB, 0);
+// ================= 账号处理器 =================
+async function processAccount(account, index) {
+  const { userName, password } = account;
+  const maskedName = mask(userName);
+  let client;
 
-      message.push(
-        '\n┌───────────────┬───────────────┬───────────────┐',
-        '│   容量类型    │    个人云     │    家庭云     │',
-        '├───────────────┼───────────────┼───────────────┤',
-        `│ 原始容量 (GB) │ ${String(firstAccount.originalPersonalGB.toFixed(2)).padStart(13)} │ ${String(firstAccount.originalFamilyGB.toFixed(2)).padStart(13)} │`,
-        '├───────────────┼───────────────┼───────────────┤',
-        `│ 新增容量 (MB) │ ${String(firstAccount.personalAddedMB).padStart(13)} │ ${String(totalFamilyAddedMB).padStart(13)} │`,
-        '├───────────────┼───────────────┼───────────────┤',
-        `│ 当前总计 (GB) │ ${String((firstAccount.originalPersonalGB + firstAccount.personalAddedMB/1024).toFixed(2)).padStart(13)} │ ${String((firstAccount.originalFamilyGB + totalFamilyAddedMB/1024).toFixed(2)).padStart(13)} │`,
-        '└───────────────┴───────────────┴───────────────┘'
-      );
+  try {
+    client = new CloudClient(userName, password);
+    logger.info(`🔐 ${maskedName} 登录中...`);
+
+    // 登录认证
+    await executeWithRetry("账号登录", () => client.login());
+    logger.info(`🚀 ${maskedName} 登录成功`);
+
+    // 初始容量记录（保持GB单位）
+    const preCapacity = await client.getUserSizeInfo();
+    if (index === 0) {
+      capacityTracker.firstAccount.prePersonalGB = bytesToUnits(preCapacity.cloudCapacityInfo.totalSize).gb;
+      capacityTracker.firstAccount.preFamilyGB = bytesToUnits(preCapacity.familyCapacityInfo.totalSize).gb;
     }
 
-  } catch (e) {
-    message.push(`全局异常：${e.message}`);
+    // 执行任务链
+    await performDailyTasks(client);
+    await performFamilyTasks(client);
+
+    // 计算容量变化
+    const postCapacity = await client.getUserSizeInfo();
+    
+    // 家庭容量计算
+    const familyDiff = postCapacity.familyCapacityInfo.totalSize - preCapacity.familyCapacityInfo.totalSize;
+    const familyBonus = bytesToUnits(familyDiff);
+    capacityTracker.totalFamilyBonus.gb += familyBonus.gb;
+    capacityTracker.totalFamilyBonus.mb += familyBonus.mb;
+
+    // 个人容量计算（仅首账号）
+    if (index === 0) {
+      const personalDiff = postCapacity.cloudCapacityInfo.totalSize - preCapacity.cloudCapacityInfo.totalSize;
+      const personalBonus = bytesToUnits(personalDiff);
+      capacityTracker.firstAccount.postPersonalGB = bytesToUnits(postCapacity.cloudCapacityInfo.totalSize).gb;
+      capacityTracker.firstAccount.personalBonus = personalBonus;
+    }
+
+    logger.info(`🎯 ${maskedName} 处理完成，新增：${formatCapacity(familyBonus)}`);
+  } catch (error) {
+    logger.error(`💥 ${maskedName} 处理失败：${error.message}`);
+    throw error;
   } finally {
-    console.log(message.join('\n'));
-    await QLAPI?.notify?.('天翼云盘签到', message.join('\n'));
+    await delay(3000);
+  }
+}
+
+// ================= 报告生成器 =================
+function formatCapacity(units) {
+  const parts = [];
+  if (units.gb > 0) parts.push(`${units.gb.toFixed(2)}GB`);
+  if (units.mb > 0) parts.push(`${units.mb}MB`);
+  return parts.join(" + ") || "0";
+}
+
+function generateCapacityReport() {
+  const { 
+    firstAccount: { 
+      prePersonalGB,
+      postPersonalGB,
+      preFamilyGB,
+      personalBonus 
+    },
+    totalFamilyBonus
+  } = capacityTracker;
+
+  // 最终家庭容量（GB单位）
+  const finalFamilyGB = preFamilyGB + totalFamilyBonus.gb;
+
+  return [
+    "📊 ====== 容量报告 ======",
+    `主账号：${mask(accounts[0]?.userName)}`,
+    "├─ 个人空间",
+    `│   • 初始：${prePersonalGB.toFixed(2)}GB`,
+    `│   • 当前：${postPersonalGB.toFixed(2)}GB (+${formatCapacity(personalBonus)})`,
+    "└─ 家庭空间",
+    `    • 初始：${preFamilyGB.toFixed(2)}GB`,
+    `    • 新增：${formatCapacity(totalFamilyBonus)}`,
+    `    • 最终：${finalFamilyGB.toFixed(2)}GB`,
+    "=".repeat(30)
+  ].join("\n");
+}
+
+// ================= 主流程 =================
+(async () => {
+  try {
+    logger.info("🚀 启动天翼云盘自动化任务");
+    logger.info(`📁 检测到 ${accounts.length} 个账号`);
+
+    for (let i = 0; i < accounts.length; i++) {
+      await processAccount(accounts[i], i);
+    }
+
+    const report = generateCapacityReport();
+    logger.info("\n" + report);
+    await sendWechatNotification(report);
+
+  } catch (error) {
+    logger.error("‼️ 全局错误：" + error.message);
+    await sendWechatNotification(`任务失败：${error.message}`);
+  } finally {
+    recording.erase();
+    logger.info("🛑 任务执行结束");
   }
 })();
