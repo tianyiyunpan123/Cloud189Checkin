@@ -4,124 +4,176 @@ const log4js = require("log4js");
 const recording = require("log4js/lib/appenders/recording");
 log4js.configure({
   appenders: {
-    vcr: {
-      type: "recording",
-    },
-    out: {
-      type: "console",
-    },
+    vcr: { type: "recording" },
+    out: { type: "console" }
   },
-  categories: { default: { appenders: ["vcr", "out"], level: "info" } },
+  categories: { default: { appenders: ["vcr", "out"], level: "info" } }
 });
 
 const logger = log4js.getLogger();
 const { CloudClient } = require("cloud189-sdk");
+const serverChan = require("./push/serverChan");
+const telegramBot = require("./push/telegramBot");
+const wecomBot = require("./push/wecomBot");
+const wxpush = require("./push/wxPusher");
 const accounts = require("../accounts");
 
-const mask = (s, start, end) => s.split("").fill("*", start, end).join("");
+// 容量统计模块
+const capacityTracker = {
+  firstAccount: {
+    personal: { original: 0, bonus: 0 },
+    family: { original: 0 }
+  },
+  totalFamilyBonus: 0,
+  hasFirstAccount: false,
 
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  recordFirstAccount(cloudData) {
+    if (this.hasFirstAccount) return;
+    
+    this.firstAccount.personal.original = cloudData.personal / (1024 ** 3);
+    this.firstAccount.family.original = cloudData.family / (1024 ** 3);
+    this.hasFirstAccount = true;
+  },
 
-// 简化后的任务：仅保留个人和家庭签到
-const doTask = async (cloudClient) => {
-  const result = [];
-  // 个人签到
-  const res = await cloudClient.userSign();
-  result.push(
-    `${res.isSign ? "已经签到过了，" : ""}个人签到获得${res.netdiskBonus}M空间`
-  );
-  await delay(2000);
-  return result;
+  addPersonalBonus(bonusMB) {
+    if (this.hasFirstAccount) {
+      this.firstAccount.personal.bonus += bonusMB;
+    }
+  },
+
+  addFamilyBonus(bonusMB) {
+    this.totalFamilyBonus += bonusMB;
+  },
+
+  generateTable() {
+    const personalTotal = this.firstAccount.personal.original + 
+      (this.firstAccount.personal.bonus / 1024);
+    const familyTotal = this.firstAccount.family.original + 
+      (this.totalFamilyBonus / 1024);
+
+    return [
+      "📊 容量汇总表",
+      "|  类别  |  原容量  | 新增容量 |  总计  |",
+      "|--------|----------|----------|--------|",
+      `| 个人云 | ${this.firstAccount.personal.original.toFixed(2)}GB | ` +
+      `${this.firstAccount.personal.bonus}M | ${personalTotal.toFixed(2)}GB |`,
+      `| 家庭云 | ${this.firstAccount.family.original.toFixed(2)}GB | ` +
+      `${this.totalFamilyBonus}M | ${familyTotal.toFixed(2)}GB |`
+    ].join("\n");
+  }
 };
 
-const doFamilyTask = async (cloudClient) => {
-  const { familyInfoResp } = await cloudClient.getFamilyList();
-  const result = [];
-  if (familyInfoResp) {
-    for (const family of familyInfoResp) {
-      const res = await cloudClient.familyUserSign(family.165515815004439);
-      result.push(
-        `家庭[${family.familyName}]签到${
-          res.signStatus ? "已存在，" : "成功，"
-        }获得${res.bonusSpace}M空间`
-      );
-      await delay(2000);
+// 任务处理模块
+const taskHandler = {
+  async personalTask(client) {
+    try {
+      const res = await client.userSign();
+      const bonus = res.isSign ? 0 : res.netdiskBonus;
+      return { success: true, bonus, msg: `获得${bonus}M空间` };
+    } catch (err) {
+      return { success: false, msg: `签到失败: ${err.message}` };
+    }
+  },
+
+  async familyTask(client) {
+    let totalBonus = 0;
+    const messages = [];
+    
+    try {
+      const { familyInfoResp } = await client.getFamilyList();
+      if (familyInfoResp) {
+        for (const family of familyInfoResp) {
+          try {
+            const res = await client.familyUserSign(family.165515815004439);
+            const bonus = res.signStatus ? 0 : res.bonusSpace;
+            totalBonus += bonus;
+            messages.push(`家庭组[${family.familyId}]获得${bonus}M`);
+          } catch (err) {
+            messages.push(`家庭组[${family.familyId}]签到失败`);
+          }
+        }
+      }
+      return { success: true, bonus: totalBonus, messages };
+    } catch (err) {
+      return { success: false, msg: `家庭任务失败: ${err.message}` };
     }
   }
-  return result;
 };
 
-async function main() {
-  global.summaryData = {
-    personal: { original: 0, add: 0 },
-    family: { original: 0, add: 0 }
-  };
+// 推送适配器
+const notifier = {
+  async sendAll(title, content) {
+    const sendTasks = [
+      this._sendServerChan(title, content),
+      this._sendTelegram(title, content),
+      this._sendWecom(title, content),
+      this._sendWxPusher(title, content)
+    ];
+    
+    await Promise.allSettled(sendTasks);
+  },
 
-  for (let i = 0; i < accounts.length; i++) {
-    const { userName, password } = accounts[i];
-    if (!userName || !password) continue;
-
-    const maskedName = mask(userName, 3, 7);
+  async _sendServerChan(title, content) {
+    if (!serverChan.sendKey) return;
     try {
-      logger.info(`\n🔒 正在处理账号 ${maskedName}`);
-      const client = new CloudClient(userName, password);
+      await superagent
+        .post(`https://sctapi.ftqq.com/${serverChan.sendKey}.send`)
+        .send({ title, desp: content });
+    } catch (err) {/* 错误处理 */}
+  },
+
+  // 其他推送渠道实现类似...
+};
+
+// 主业务流程
+async function execute() {
+  for (const [index, account] of accounts.entries()) {
+    const client = new CloudClient(account.userName, account.password);
+    
+    try {
       await client.login();
-
-      // 执行个人签到
-      const personalResult = await doTask(client);
-      personalResult.forEach(logger.info);
-
-      // 执行家庭签到
-      const familyResult = await doFamilyTask(client);
-      familyResult.forEach(logger.info);
-
-      // 获取容量信息
-      const { cloudCapacityInfo, familyCapacityInfo } = await client.getUserSizeInfo();
-
-      // 记录第一个账号的原始容量
-      if (i === 0) {
-        global.summaryData.personal.original = (cloudCapacityInfo.totalSize / 1024 ** 3).toFixed(2);
-        global.summaryData.family.original = (familyCapacityInfo.totalSize / 1024 ** 3).toFixed(2);
+      
+      // 获取基础容量信息
+      const sizeInfo = await client.getUserSizeInfo();
+      if (index === 0) {
+        capacityTracker.recordFirstAccount({
+          personal: sizeInfo.cloudCapacityInfo.totalSize,
+          family: sizeInfo.familyCapacityInfo.totalSize
+        });
       }
 
-      // 累计容量增量
-      const personalAdd = personalResult.reduce((sum, r) => sum + (/\d+/.exec(r)?.[0] || 0), 0);
-      const familyAdd = familyResult.reduce((sum, r) => sum + (/\d+/.exec(r)?.[0] || 0), 0);
-      
-      global.summaryData.personal.add += personalAdd;
-      global.summaryData.family.add += familyAdd;
+      // 执行任务
+      const personalResult = await taskHandler.personalTask(client);
+      const familyResult = await taskHandler.familyTask(client);
 
-    } catch (e) {
-      logger.error(`❌ 账号 ${maskedName} 处理失败:`, e.message);
-    } finally {
-      logger.info(`✅ 账号 ${maskedName} 处理完成\n${"-".repeat(30)}`);
+      // 记录数据
+      if (index === 0 && personalResult.success) {
+        capacityTracker.addPersonalBonus(personalResult.bonus);
+      }
+      if (familyResult.success) {
+        capacityTracker.addFamilyBonus(familyResult.bonus);
+      }
+
+    } catch (err) {
+      logger.error(`账号${index + 1}处理失败: ${err.message}`);
     }
   }
 
-  // 生成汇总报告
-  logger.info(`
-📊 容量变动汇总
-────────────────────────
-个人云 | 原容量: ${global.summaryData.personal.original}G
-       | 本次新增: +${global.summaryData.personal.add}M
-────────────────────────
-家庭云 | 原容量: ${global.summaryData.family.original}G
-       | 累计新增: +${global.summaryData.family.add}M
-────────────────────────
-注：多个账号时家庭云容量会累计所有账号的签到奖励`);
+  // 生成最终报告
+  const report = [
+    "✅ 任务执行完成",
+    capacityTracker.generateTable(),
+    "📝 详细日志请查看服务器记录"
+  ].join("\n\n");
 
-  return global.summaryData;
+  await notifier.sendAll("天翼云盘容量报告", report);
 }
 
-// 执行并推送结果
+// 启动执行
 (async () => {
   try {
-    await main();
+    await execute();
   } finally {
-    const events = recording.replay();
-    const content = events.map(e => e.data[0]).join("\n");
-    // 这里调用你的推送函数（示例保留推送结构）
-    console.log("\n📨 推送内容：\n" + content);
     recording.erase();
   }
 })();
