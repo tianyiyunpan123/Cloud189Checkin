@@ -72,7 +72,7 @@ const doFamilyTask = async (cloudClient) => {
     const { familyInfoResp } = await cloudClient.getFamilyList();
     if (familyInfoResp) {
       for (const family of familyInfoResp) {
-        const res = await cloudClient.familyUserSign(family.165515815004439);
+        const res = await cloudClient.familyUserSign(165515815004439);
         familyAddedMB += res.bonusSpace || 0;
         result.push(`家庭任务${res.signStatus ? "已经签到过了，" : ""}签到获得${res.bonusSpace}M空间`);
       }
