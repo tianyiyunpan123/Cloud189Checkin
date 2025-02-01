@@ -33,10 +33,10 @@ const doTask = async (cloudClient) => {
   try {
     const res = await cloudClient.userSign();
     const personalAdd = res.netdiskBonus;
-    result.push(`? ${res.isSign ? "已签到" : "签到成功"}，获得 ${personalAdd}M 空间`);
+    result.push(`▸ ${res.isSign ? "已签到" : "签到成功"}，获得 ${personalAdd}M 空间`);
     return { result, personalAdd };
   } catch (e) {
-    result.push(`? 任务失败：${e.message}`);
+    result.push(`⚠ 任务失败：${e.message}`);
     return { result, personalAdd: 0 };
   }
 };
@@ -50,16 +50,16 @@ const doFamilyTask = async (cloudClient) => {
       const { familyId } = familyInfoResp[0];
       const res = await cloudClient.familyUserSign(165515815004439);
       const bonus = res.bonusSpace || 0;
-      results.push(`? 家庭云 ${res.signStatus ? "已签到" : "签到成功"}，获得 ${bonus}M 空间`);
+      results.push(`▹ 家庭云 ${res.signStatus ? "已签到" : "签到成功"}，获得 ${bonus}M 空间`);
       familyAdd += bonus;
     }
   } catch (e) {
-    results.push(`? 家庭任务失败：${e.message}`);
+    results.push(`⚠ 家庭任务失败：${e.message}`);
   }
   return { results, familyAdd };
 };
 
-// ==================== 推送系统整合 ====================
+// ==================== 推送系统 ====================
 async function sendNotifications(title, content) {
   // 青龙面板通知
   if (typeof $ !== 'undefined' && $.notify) {
@@ -103,7 +103,7 @@ async function sendNotifications(title, content) {
     superagent.post("https://wxpusher.zjiecode.com/api/send/message")
       .send({
         appToken: wxpush.appToken,
-        contentType: 3,  // 使用Markdown格式
+        contentType: 3,
         summary: title,
         content: `**${title}**\n\`\`\`\n${content}\n\`\`\``,
         uids: [wxpush.uid]
@@ -124,7 +124,7 @@ async function sendNotifications(title, content) {
       if (!userName || !password) continue;
 
       const userMask = mask(userName);
-      const accountLog = [`\n? 账户 ${index + 1} │ ${userMask}`];
+      const accountLog = [`\n✦ 账户 ${index + 1} │ ${userMask}`];
       
       try {
         const client = new CloudClient(userName, password);
@@ -154,7 +154,7 @@ async function sendNotifications(title, content) {
         accountLog.push('├' + '─'.repeat(35));
 
       } catch (e) {
-        accountLog.push(`? 账户异常：${e.message}`);
+        accountLog.push(`⚠ 账户异常：${e.message}`);
       } finally {
         reportLines.push(...accountLog);
       }
@@ -177,7 +177,7 @@ async function sendNotifications(title, content) {
     }
 
   } catch (e) {
-    reportLines.push(`? 系统异常：${e.message}`);
+    reportLines.push(`⚠ 系统异常：${e.message}`);
   } finally {
     const finalReport = reportLines.join('\n');
     console.log(finalReport);
