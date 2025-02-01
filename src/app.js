@@ -47,7 +47,6 @@ const doFamilyTask = async (cloudClient) => {
   try {
     const { familyInfoResp } = await cloudClient.getFamilyList();
     if (familyInfoResp?.length) {
-      // 每个账号只执行第一个家庭组签到（根据需求调整）
       const { familyId } = familyInfoResp[0];
       const res = await cloudClient.familyUserSign(165515815004439);
       const bonus = res.bonusSpace || 0;
@@ -60,15 +59,57 @@ const doFamilyTask = async (cloudClient) => {
   return { results, familyAdd };
 };
 
-// ==================== 通知推送系统 ====================
+// ==================== 推送系统整合 ====================
 async function sendNotifications(title, content) {
+  // 青龙面板通知
   if (typeof $ !== 'undefined' && $.notify) {
     await $.notify(title, content);
   }
 
   const { serverChan, telegramBot, wecomBot, wxpush } = pushConfig;
   
-  // 各推送渠道实现...
+  // ServerChan推送
+  if (serverChan.sendKey) {
+    superagent.post(`https://sctapi.ftqq.com/${serverChan.sendKey}.send`)
+      .send({ title, desp: content })
+      .catch(e => logger.error('ServerChan推送失败:', e));
+  }
+
+  // Telegram推送
+  if (telegramBot.botToken && telegramBot.chatId) {
+    superagent.post(`https://api.telegram.org/bot${telegramBot.botToken}/sendMessage`)
+      .send({ 
+        chat_id: telegramBot.chatId,
+        text: `**${title}**\n\`\`\`\n${content}\n\`\`\``,
+        parse_mode: 'Markdown'
+      })
+      .catch(e => logger.error('Telegram推送失败:', e));
+  }
+
+  // 企业微信推送
+  if (wecomBot.key) {
+    superagent.post(`https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=${wecomBot.key}`)
+      .send({
+        msgtype: "markdown",
+        markdown: {
+          content: `**${title}**\n\`\`\`\n${content}\n\`\`\``
+        }
+      })
+      .catch(e => logger.error('企业微信推送失败:', e));
+  }
+
+  // WxPusher推送
+  if (wxpush.appToken && wxpush.uid) {
+    superagent.post("https://wxpusher.zjiecode.com/api/send/message")
+      .send({
+        appToken: wxpush.appToken,
+        contentType: 3,  // 使用Markdown格式
+        summary: title,
+        content: `**${title}**\n\`\`\`\n${content}\n\`\`\``,
+        uids: [wxpush.uid]
+      })
+      .catch(e => logger.error('WxPusher推送失败:', e));
+  }
 }
 
 // ==================== 主执行流程 ====================
