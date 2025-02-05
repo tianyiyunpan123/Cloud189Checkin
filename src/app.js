@@ -27,39 +27,6 @@ const mask = (s, start = 3, end = 7) =>
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// 定义颜色常量
-const colors = {
-    reset: '\x1b[0m',
-    bright: '\x1b[1m',
-    dim: '\x1b[2m',
-    underscore: '\x1b[4m',
-    blink: '\x1b[5m',
-    reverse: '\x1b[7m',
-    hidden: '\x1b[8m',
-    fg: {
-        black: '\x1b[30m',
-        red: '\x1b[31m',
-        green: '\x1b[32m',
-        yellow: '\x1b[33m',
-        blue: '\x1b[34m',
-        magenta: '\x1b[35m',
-        cyan: '\x1b[36m',
-        white: '\x1b[37m',
-        crimson: '\x1b[38m'
-    },
-    bg: {
-        black: '\x1b[40m',
-        red: '\x1b[41m',
-        green: '\x1b[42m',
-        yellow: '\x1b[43m',
-        blue: '\x1b[44m',
-        magenta: '\x1b[45m',
-        cyan: '\x1b[46m',
-        white: '\x1b[47m',
-        crimson: '\x1b[48m'
-    }
-};
-
 // ==================== 核心任务逻辑 ====================
 const doTask = async (cloudClient) => {
     const result = [];
@@ -67,12 +34,12 @@ const doTask = async (cloudClient) => {
         const res = await cloudClient.userSign();
         const personalAdd = res.netdiskBonus;
         const status = res.isSign? "已签到" : "签到成功";
-        const msg = `▸ ${status}，获得 ${personalAdd}M 空间`;
-        result.push(colors.fg.green + msg + colors.reset);
+        const msg = `✔ ${status}，获得 ${personalAdd}M 空间`;
+        result.push(msg);
         return { result, personalAdd };
     } catch (e) {
         const msg = `⚠ 任务失败：${e.message}`;
-        result.push(colors.fg.red + msg + colors.reset);
+        result.push(msg);
         return { result, personalAdd: 0 };
     }
 };
@@ -88,14 +55,14 @@ const doFamilyTask = async (cloudClient) => {
             const res = await cloudClient.familyUserSign(165515815004439);
             const bonus = res.bonusSpace || 0;
             const status = res.signStatus? "已签到" : "签到成功";
-            const msg = `▹ 家庭云 ${status}，获得 ${bonus}M 空间`;
-            results.push(colors.fg.green + msg + colors.reset);
+            const msg = `❖ 家庭云 ${status}，获得 ${bonus}M 空间`;
+            results.push(msg);
             familyAdd += bonus;
             familySuccessCount = 1;
         }
     } catch (e) {
         const msg = `⚠ 家庭任务失败：${e.message}`;
-        results.push(colors.fg.red + msg + colors.reset);
+        results.push(msg);
     }
     return { results, familyAdd, familySuccessCount };
 };
@@ -109,50 +76,47 @@ async function sendNotifications(title, content) {
 
     const { serverChan, telegramBot, wecomBot, wxpush } = pushConfig;
 
-    // 去除ANSI转义序列，确保微信推送正常显示
-    const cleanContent = content.replace(/\x1b\[\d+m/g, '');
-
     // ServerChan推送
     if (serverChan.sendKey) {
         superagent.post(`https://sctapi.ftqq.com/${serverChan.sendKey}.send`)
-         .send({ title, desp: cleanContent })
-         .catch(e => logger.error('ServerChan推送失败:', e));
+      .send({ title, desp: content })
+      .catch(e => logger.error('ServerChan推送失败:', e));
     }
 
     // Telegram推送
     if (telegramBot.botToken && telegramBot.chatId) {
         superagent.post(`https://api.telegram.org/bot${telegramBot.botToken}/sendMessage`)
-         .send({
+      .send({
                 chat_id: telegramBot.chatId,
-                text: `**${title}**\n\`\`\`\n${cleanContent}\n\`\`\``,
+                text: `**${title}**\n\`\`\`\n${content}\n\`\`\``,
                 parse_mode: 'Markdown'
             })
-         .catch(e => logger.error('Telegram推送失败:', e));
+      .catch(e => logger.error('Telegram推送失败:', e));
     }
 
     // 企业微信推送
     if (wecomBot.key) {
         superagent.post(`https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=${wecomBot.key}`)
-         .send({
+      .send({
                 msgtype: "markdown",
                 markdown: {
-                    content: `**${title}**\n\`\`\`\n${cleanContent}\n\`\`\``
+                    content: `**${title}**\n\`\`\`\n${content}\n\`\`\``
                 }
             })
-         .catch(e => logger.error('企业微信推送失败:', e));
+      .catch(e => logger.error('企业微信推送失败:', e));
     }
 
     // WxPusher推送
     if (wxpush.appToken && wxpush.uid) {
         superagent.post("https://wxpusher.zjiecode.com/api/send/message")
-         .send({
+      .send({
                 appToken: wxpush.appToken,
                 contentType: 3,
                 summary: title,
-                content: `**${title}**\n\`\`\`\n${cleanContent}\n\`\`\``,
+                content: `**${title}**\n\`\`\`\n${content}\n\`\`\``,
                 uids: [wxpush.uid]
             })
-         .catch(e => logger.error('WxPusher推送失败:', e));
+      .catch(e => logger.error('WxPusher推送失败:', e));
     }
 }
 
@@ -161,7 +125,7 @@ async function sendNotifications(title, content) {
     let firstAccountData = null;
     let totalFamilyAdd = 0;
     let totalFamilySuccessCount = 0;
-    const reportLines = [colors.bright + '══════════ 天翼云盘任务报告 ══════════' + colors.reset];
+    const reportLines = ['══════════ 天翼云盘任务报告 ══════════'];
 
     try {
         for (const [index, account] of accounts.entries()) {
@@ -169,7 +133,7 @@ async function sendNotifications(title, content) {
             if (!userName ||!password) continue;
 
             const userMask = mask(userName);
-            const accountLog = [colors.bright + `✦ 账户 ${index + 1} │ ${userMask}` + colors.reset];
+            const accountLog = [`🆔 账户 ${index + 1} │ ${userMask}`];
 
             try {
                 const client = new CloudClient(userName, password);
@@ -201,7 +165,7 @@ async function sendNotifications(title, content) {
 
             } catch (e) {
                 const msg = `⚠ 账户异常：${e.message}`;
-                accountLog.push(colors.fg.red + msg + colors.reset);
+                accountLog.push(msg);
             }
             reportLines.push(...accountLog);
         }
@@ -209,21 +173,21 @@ async function sendNotifications(title, content) {
         // ==================== 生成报表 ====================
         if (firstAccountData) {
             reportLines.push(
-                colors.bright + '\n════════════ 容量汇总 ════════════' + colors.reset,
+                '\n════════════ 容量汇总 ════════════',
                 `账户名称: ${firstAccountData.user}`,
                 `个人云容量: ${firstAccountData.personalGB.toFixed(2)}G`,
                 `家庭云容量: ${firstAccountData.familyGB.toFixed(2)}G`,
-                colors.bright + '\n════════════ 容量变动 ════════════' + colors.reset,
+                '\n════════════ 容量变动 ════════════',
                 `  ➤ 首个账号个人云: +${firstAccountData.personalAdd}M`,
                 `  ➤ 全部家庭云合计: +${totalFamilyAdd}M`,
                 `  ➤ 家庭云成功执行个数: ${totalFamilySuccessCount}`,
-                colors.bright + '════════════════════════════════════' + colors.reset
+                '════════════════════════════════════'
             );
         }
 
     } catch (e) {
         const msg = `⚠ 系统异常：${e.message}`;
-        reportLines.push(colors.fg.red + msg + colors.reset);
+        reportLines.push(msg);
     } finally {
         const finalReport = reportLines.join('\n');
         console.log(finalReport);
