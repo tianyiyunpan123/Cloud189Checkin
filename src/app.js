@@ -27,10 +27,6 @@ const mask = (s, start = 3, end = 7) =>
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// ANSI转义序列定义
-const ANSI_BOLD = '\x1b[1m';
-const ANSI_RESET = '\x1b[0m';
-
 // 核心任务逻辑
 const doTask = async (cloudClient) => {
     const result = [];
@@ -38,7 +34,7 @@ const doTask = async (cloudClient) => {
         const res = await cloudClient.userSign();
         const personalAdd = res.netdiskBonus;
         const status = res.isSign? "已签到" : "签到成功";
-        const msg = `个人签到 ${personalAdd.toString().padStart(4)}M`;
+        const msg = `签到个人 ${personalAdd.toString().padStart(4)}M`;
         result.push(msg);
         return { result, personalAdd };
     } catch (e) {
@@ -59,7 +55,7 @@ const doFamilyTask = async (cloudClient) => {
             const res = await cloudClient.familyUserSign(165515815004439);
             const bonus = res.bonusSpace || 0;
             const status = res.signStatus? "已签到" : "签到成功";
-            const msg = `家庭签到 ${bonus.toString().padStart(4)}M`;
+            const msg = `家庭 ${bonus.toString().padStart(4)}M`;
             results.push(msg);
             familyAdd += bonus;
             familySuccessCount = 1;
@@ -83,47 +79,44 @@ async function sendNotifications(title, content) {
     // ServerChan推送
     if (serverChan.sendKey) {
         superagent.post(`https://sctapi.ftqq.com/${serverChan.sendKey}.send`)
-          .send({ title, desp: content })
-          .catch(e => logger.error('ServerChan推送失败:', e));
+            .send({ title, desp: content })
+            .catch(e => logger.error('ServerChan推送失败:', e));
     }
 
     // Telegram推送
     if (telegramBot.botToken && telegramBot.chatId) {
-        // 这里如果需要在Telegram中加粗，还是需要Markdown格式，暂时保留原方式
         superagent.post(`https://api.telegram.org/bot${telegramBot.botToken}/sendMessage`)
-          .send({
+            .send({
                 chat_id: telegramBot.chatId,
-                text: `**${title}**\n\`\`\`\n${content}\n\`\`\``,
+                text: `${title}\n\`\`\`\n${content}\n\`\`\``,
                 parse_mode: 'Markdown'
             })
-          .catch(e => logger.error('Telegram推送失败:', e));
+            .catch(e => logger.error('Telegram推送失败:', e));
     }
 
     // 企业微信推送
     if (wecomBot.key) {
-        // 这里如果需要在企业微信中加粗，还是需要Markdown格式，暂时保留原方式
         superagent.post(`https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=${wecomBot.key}`)
-          .send({
+            .send({
                 msgtype: "markdown",
                 markdown: {
-                    content: `**${title}**\n\`\`\`\n${content}\n\`\`\``
+                    content: `${title}\n\`\`\`\n${content}\n\`\`\``
                 }
             })
-          .catch(e => logger.error('企业微信推送失败:', e));
+            .catch(e => logger.error('企业微信推送失败:', e));
     }
 
     // WxPusher推送
     if (wxpush.appToken && wxpush.uid) {
-        // 这里如果需要在WxPusher中加粗，还是需要Markdown格式，暂时保留原方式
         superagent.post("https://wxpusher.zjiecode.com/api/send/message")
-          .send({
+            .send({
                 appToken: wxpush.appToken,
                 contentType: 3,
                 summary: title,
-                content: `**${title}**\n\`\`\`\n${content}\n\`\`\``,
+                content: `${title}\n\`\`\`\n${content}\n\`\`\``,
                 uids: [wxpush.uid]
             })
-          .catch(e => logger.error('WxPusher推送失败:', e));
+            .catch(e => logger.error('WxPusher推送失败:', e));
     }
 }
 
@@ -133,8 +126,8 @@ async function sendNotifications(title, content) {
     let totalFamilyAdd = 0;
     let totalFamilySuccessCount = 0;
     const reportLines = [];
-    // 加粗标题并添加双横线装饰
-    reportLines.push(`${ANSI_BOLD}天翼云盘任务报告${ANSI_RESET}\n`.padEnd(50, '='));
+    // 标题并添加双横线装饰
+    reportLines.push('天翼云盘任务报告\n'.padEnd(50, '='));
 
     try {
         for (const [index, account] of accounts.entries()) {
@@ -157,10 +150,10 @@ async function sendNotifications(title, content) {
                 const familyInfo = familyRes.results.length > 0? familyRes.results[0] : '❌ 家庭: 家庭任务失败：无家庭云任务';
                 const accountNumber = `🆔 账户 ${(index + 1).toString().padStart(2, ' ')}`;
                 const personalSpace = personalInfo.split(' ')[2];
-                const familySpace = familyInfo.includes('家庭签到')? familyInfo.split(' ')[2] : '';
-                const formattedPersonal = `个人签到 ${personalSpace.padStart(4)}M`.padEnd(12);
-                const formattedFamily = familyInfo.includes('家庭签到')? `家庭签到 ${familySpace.padStart(4)}M` : familyInfo;
-                const accountLog = `${accountNumber}: ${formattedPersonal} ${formattedFamily}`;
+                const familySpace = familyInfo.includes('家庭')? familyInfo.split(' ')[1] : '';
+                const formattedPersonal = `签到个人 ${personalSpace.padStart(4)}M`.padEnd(13);
+                const formattedFamily = familyInfo.includes('家庭')? `，家庭 ${familySpace.padStart(4)}M` : `，${familyInfo}`;
+                const accountLog = `${accountNumber}: ${formattedPersonal}${formattedFamily}`;
                 reportLines.push(accountLog);
 
                 totalFamilyAdd += familyRes.familyAdd;
@@ -179,15 +172,15 @@ async function sendNotifications(title, content) {
             } catch (e) {
                 const msg = `❌ 账户异常：${e.message}`;
                 const accountNumber = `🆔 账户 ${(index + 1).toString().padStart(2, ' ')}`;
-                const accountLog = `${accountNumber}: ${msg.padEnd(12)}`;
+                const accountLog = `${accountNumber}: ${msg.padEnd(13)}`;
                 reportLines.push(accountLog);
             }
         }
 
-        // 生成报表，加粗并添加双横线装饰
+        // 生成报表，添加双横线装饰
         if (lastAccountData) {
             reportLines.push('\n'.padEnd(50, '='));
-            reportLines.push(`${ANSI_BOLD}  容量汇总与变动${ANSI_RESET}`);
+            reportLines.push('  容量汇总与变动');
             reportLines.push(`  🆔 账户名称: ${lastAccountData.user}`);
             reportLines.push(`  📋 个人云容量: ${lastAccountData.personalGB.toFixed(2)}G（本次 +${lastAccountData.personalAdd}M）`);
             reportLines.push(`  🏠 家庭云容量: ${lastAccountData.familyGB.toFixed(2)}G（家庭云合计 +${totalFamilyAdd}M）`);
@@ -204,5 +197,3 @@ async function sendNotifications(title, content) {
         recording.erase();
     }
 })();
-
-
