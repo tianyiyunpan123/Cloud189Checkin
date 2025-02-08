@@ -34,11 +34,11 @@ const doTask = async (cloudClient) => {
         const res = await cloudClient.userSign();
         const personalAdd = res.netdiskBonus;
         const status = res.isSign? "已签到" : "签到成功";
-        const msg = `✔ ${status}，获得 ${personalAdd}M 空间`;
+        const msg = `📋 个人签到 ${personalAdd.toString().padStart(4)}M`;
         result.push(msg);
         return { result, personalAdd };
     } catch (e) {
-        const msg = `⚠ 任务失败：${e.message}`;
+        const msg = `❌ 个人任务失败：${e.message}`;
         result.push(msg);
         return { result, personalAdd: 0 };
     }
@@ -55,13 +55,13 @@ const doFamilyTask = async (cloudClient) => {
             const res = await cloudClient.familyUserSign(165515815004439);
             const bonus = res.bonusSpace || 0;
             const status = res.signStatus? "已签到" : "签到成功";
-            const msg = `❖ 家庭云 ${status}，获得 ${bonus}M 空间`;
+            const msg = `🏠 家庭签到${bonus.toString().padStart(4)}M`;
             results.push(msg);
             familyAdd += bonus;
             familySuccessCount = 1;
         }
     } catch (e) {
-        const msg = `⚠ 家庭任务失败：${e.message}`;
+        const msg = `❌ 家庭: 家庭任务失败：${e.message}`;
         results.push(msg);
     }
     return { results, familyAdd, familySuccessCount };
@@ -79,53 +79,53 @@ async function sendNotifications(title, content) {
     // ServerChan推送
     if (serverChan.sendKey) {
         superagent.post(`https://sctapi.ftqq.com/${serverChan.sendKey}.send`)
-      .send({ title, desp: content })
-      .catch(e => logger.error('ServerChan推送失败:', e));
+            .send({ title, desp: content })
+            .catch(e => logger.error('ServerChan推送失败:', e));
     }
 
     // Telegram推送
     if (telegramBot.botToken && telegramBot.chatId) {
         superagent.post(`https://api.telegram.org/bot${telegramBot.botToken}/sendMessage`)
-      .send({
+            .send({
                 chat_id: telegramBot.chatId,
                 text: `**${title}**\n\`\`\`\n${content}\n\`\`\``,
                 parse_mode: 'Markdown'
             })
-      .catch(e => logger.error('Telegram推送失败:', e));
+            .catch(e => logger.error('Telegram推送失败:', e));
     }
 
     // 企业微信推送
     if (wecomBot.key) {
         superagent.post(`https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=${wecomBot.key}`)
-      .send({
+            .send({
                 msgtype: "markdown",
                 markdown: {
                     content: `**${title}**\n\`\`\`\n${content}\n\`\`\``
                 }
             })
-      .catch(e => logger.error('企业微信推送失败:', e));
+            .catch(e => logger.error('企业微信推送失败:', e));
     }
 
     // WxPusher推送
     if (wxpush.appToken && wxpush.uid) {
         superagent.post("https://wxpusher.zjiecode.com/api/send/message")
-      .send({
+            .send({
                 appToken: wxpush.appToken,
                 contentType: 3,
                 summary: title,
                 content: `**${title}**\n\`\`\`\n${content}\n\`\`\``,
                 uids: [wxpush.uid]
             })
-      .catch(e => logger.error('WxPusher推送失败:', e));
+            .catch(e => logger.error('WxPusher推送失败:', e));
     }
 }
 
 // ==================== 主执行流程 ====================
 (async () => {
-    let firstAccountData = null;
+    let lastAccountData = null;
     let totalFamilyAdd = 0;
     let totalFamilySuccessCount = 0;
-    const reportLines = ['══════════ 天翼云盘任务报告 ══════════'];
+    const reportLines = ['🗄️🗄️🗄️ 天翼云盘任务报告 🗄️🗄️🗄️'];
 
     try {
         for (const [index, account] of accounts.entries()) {
@@ -133,8 +133,6 @@ async function sendNotifications(title, content) {
             if (!userName ||!password) continue;
 
             const userMask = mask(userName);
-            const accountLog = [`🆔 账户 ${index + 1} │ ${userMask}`];
-
             try {
                 const client = new CloudClient(userName, password);
                 await client.login();
@@ -146,53 +144,49 @@ async function sendNotifications(title, content) {
                 ]);
 
                 // 记录日志
-                accountLog.push(...taskRes.result,...familyRes.results);
+                const personalInfo = taskRes.result[0].padEnd(20);
+                const familyInfo = familyRes.results[0]? familyRes.results[0].padEnd(20) : '❌ 家庭: 无家庭云任务';
+                const accountLog = `🆔 账户 ${index + 1}: ${userMask}  |  ${personalInfo} |  ${familyInfo}`;
+                reportLines.push(accountLog);
+
                 totalFamilyAdd += familyRes.familyAdd;
                 totalFamilySuccessCount += familyRes.familySuccessCount;
 
-                // 记录首个账号数据
-                if (index === 0) {
+                // 记录最后一个账号数据
+                if (index === accounts.length - 1) {
                     const sizeInfo = await client.getUserSizeInfo();
-                    firstAccountData = {
+                    lastAccountData = {
                         user: userMask,
                         personalGB: sizeInfo.cloudCapacityInfo.totalSize / 1024 ** 3,
                         familyGB: sizeInfo.familyCapacityInfo.totalSize / 1024 ** 3,
                         personalAdd: taskRes.personalAdd
                     };
                 }
-
-                // accountLog.push(colors.dim + '├' + '─'.repeat(35) + colors.reset); // 去除线条
-
             } catch (e) {
-                const msg = `⚠ 账户异常：${e.message}`;
-                accountLog.push(msg);
+                const msg = `❌ 账户异常：${e.message}`;
+                reportLines.push(`🆔 账户 ${index + 1}: ${userMask}  |  ${msg}`);
             }
-            reportLines.push(...accountLog);
         }
 
         // ==================== 生成报表 ====================
-        if (firstAccountData) {
+        if (lastAccountData) {
             reportLines.push(
-                '\n════════════ 容量汇总 ════════════',
-                `账户名称: ${firstAccountData.user}`,
-                `个人云容量: ${firstAccountData.personalGB.toFixed(2)}G`,
-                `家庭云容量: ${firstAccountData.familyGB.toFixed(2)}G`,
-                '\n════════════ 容量变动 ════════════',
-                `  ➤ 首个账号个人云: +${firstAccountData.personalAdd}M`,
-                `  ➤ 全部家庭云合计: +${totalFamilyAdd}M`,
-                `  ➤ 家庭云成功执行个数: ${totalFamilySuccessCount}`,
-                '════════════════════════════════════'
+                '\n📊📊📊 容量汇总与变动 📊📊📊',
+                `  🆔 账户名称: ${lastAccountData.user}`,
+                `  📋 个人云容量: ${lastAccountData.personalGB.toFixed(2)}G（本次 +${lastAccountData.personalAdd}M）`,
+                `  🏠 家庭云容量: ${lastAccountData.familyGB.toFixed(2)}G（全部家庭云合计 +${totalFamilyAdd}M）`,
+                `  ✅ 家庭云成功执行个数: ${totalFamilySuccessCount}`,
+                '🗄️🗄️🗄️🗄️🗄️🗄️🗄️🗄️🗄️🗄️🗄️🗄️🗄️🗄️🗄️🗄️'
             );
         }
 
     } catch (e) {
-        const msg = `⚠ 系统异常：${e.message}`;
+        const msg = `❌ 系统异常：${e.message}`;
         reportLines.push(msg);
     } finally {
         const finalReport = reportLines.join('\n');
         console.log(finalReport);
-        await sendNotifications('☁️ 天翼云签到报告', finalReport);
+        await sendNotifications('📝 天翼云签到报告', finalReport);
         recording.erase();
     }
 })();
-
