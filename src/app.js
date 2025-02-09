@@ -40,7 +40,7 @@ const doTask = async (cloudClient) => {
         }
         const personalAdd = res.netdiskBonus;
         const status = res.isSign? "已签到" : "签到成功";
-        const msg = `签到个人 ${personalAdd.toString().padStart(4)}M`;
+        const msg = `签到个人${personalAdd.toString().padStart(4)}M`;
         result.push(msg);
         return { result, personalAdd };
     } catch (e) {
@@ -68,7 +68,7 @@ const doFamilyTask = async (cloudClient) => {
             }
             const bonus = res.bonusSpace || 0;
             const status = res.signStatus? "已签到" : "签到成功";
-            const msg = `家庭 ${bonus.toString().padStart(4)}M`;
+            const msg = `家庭${bonus.toString().padStart(4)}M`;
             results.push(msg);
             familyAdd += bonus;
             familySuccessCount = 1;
@@ -98,11 +98,11 @@ async function sendNotifications(title, content) {
     // ServerChan推送
     if (serverChan.sendKey) {
         superagent.post(`https://sctapi.ftqq.com/${serverChan.sendKey}.send`)
-           .send({ title, desp: content })
-           .then(res => {
+          .send({ title, desp: content })
+          .then(res => {
                 logger.info('ServerChan推送成功:', res.status);
             })
-           .catch(e => {
+          .catch(e => {
                 logger.error('ServerChan推送失败:', e.message, e.response?.status);
             });
     }
@@ -110,15 +110,15 @@ async function sendNotifications(title, content) {
     // Telegram推送
     if (telegramBot.botToken && telegramBot.chatId) {
         superagent.post(`https://api.telegram.org/bot${telegramBot.botToken}/sendMessage`)
-           .send({
+          .send({
                 chat_id: telegramBot.chatId,
                 text: `${title}\n\`\`\`\n${content}\n\`\`\``,
                 parse_mode: 'Markdown'
             })
-           .then(res => {
+          .then(res => {
                 logger.info('Telegram推送成功:', res.status);
             })
-           .catch(e => {
+          .catch(e => {
                 logger.error('Telegram推送失败:', e.message, e.response?.status);
             });
     }
@@ -126,16 +126,16 @@ async function sendNotifications(title, content) {
     // 企业微信推送
     if (wecomBot.key) {
         superagent.post(`https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=${wecomBot.key}`)
-           .send({
+          .send({
                 msgtype: "markdown",
                 markdown: {
                     content: `${title}\n\`\`\`\n${content}\n\`\`\``
                 }
             })
-           .then(res => {
+          .then(res => {
                 logger.info('企业微信推送成功:', res.status);
             })
-           .catch(e => {
+          .catch(e => {
                 logger.error('企业微信推送失败:', e.message, e.response?.status);
             });
     }
@@ -143,17 +143,17 @@ async function sendNotifications(title, content) {
     // WxPusher推送
     if (wxpush.appToken && wxpush.uid) {
         superagent.post("https://wxpusher.zjiecode.com/api/send/message")
-           .send({
+          .send({
                 appToken: wxpush.appToken,
                 contentType: 3,
                 summary: title,
                 content: `${title}\n\`\`\`\n${content}\n\`\`\``,
                 uids: [wxpush.uid]
             })
-           .then(res => {
+          .then(res => {
                 logger.info('WxPusher推送成功:', res.status);
             })
-           .catch(e => {
+          .catch(e => {
                 logger.error('WxPusher推送失败:', e.message, e.response?.status);
             });
     }
@@ -187,12 +187,12 @@ async function sendNotifications(title, content) {
                 // 记录日志，调整格式确保对齐
                 const personalInfo = taskRes.result[0];
                 const familyInfo = familyRes.results.length > 0? familyRes.results[0] : '❌ 家庭: 家庭任务失败：无家庭云任务';
-                const accountNumber = `🆔 账户 ${(index + 1).toString().padStart(2, ' ')}`;
-                const personalSpace = personalInfo.split(' ')[2];
-                const familySpace = familyInfo.includes('家庭')? familyInfo.split(' ')[1] : '';
-                const formattedPersonal = `签到个人 ${personalSpace.padStart(4)}M`.padEnd(13);
-                const formattedFamily = familyInfo.includes('家庭')? `，家庭 ${familySpace.padStart(4)}M` : `，${familyInfo}`;
-                const accountLog = `${accountNumber}: ${formattedPersonal}${formattedFamily}`;
+                const accountNumber = `🆔 账户${(index + 1).toString().padStart(2, '0')}:`;
+                const personalSpace = personalInfo.split('人')[1];
+                const familySpace = familyInfo.includes('家庭')? familyInfo.split('庭')[1] : '';
+                const formattedPersonal = `签到个人${personalSpace.padStart(4)}M`.padEnd(12);
+                const formattedFamily = familyInfo.includes('家庭')? `家庭${familySpace.padStart(4)}M` : `，${familyInfo}`;
+                const accountLog = `${accountNumber} ${formattedPersonal}，${formattedFamily}`;
                 reportLines.push(accountLog);
 
                 totalFamilyAdd += familyRes.familyAdd;
@@ -210,8 +210,8 @@ async function sendNotifications(title, content) {
                 }
             } catch (e) {
                 const msg = `❌ 账户异常：${e.message}`;
-                const accountNumber = `🆔 账户 ${(index + 1).toString().padStart(2, ' ')}`;
-                const accountLog = `${accountNumber}: ${msg.padEnd(13)}`;
+                const accountNumber = `🆔 账户${(index + 1).toString().padStart(2, '0')}:`;
+                const accountLog = `${accountNumber} ${msg.padEnd(12)}`;
                 reportLines.push(accountLog);
             }
         }
