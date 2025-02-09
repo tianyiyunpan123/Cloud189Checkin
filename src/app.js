@@ -165,11 +165,6 @@ async function sendNotifications(title, content) {
     let totalFamilyAdd = 0;
     let totalFamilySuccessCount = 0;
     const reportLines = [];
-    // 标题并添加双横线装饰
-    const title = '天翼云盘任务报告';
-    const sampleAccountLog = `🆔 账户00: 签到个人    0M，家庭    0M`;
-    reportLines.push(title);
-    reportLines.push('='.repeat(sampleAccountLog.length));
 
     try {
         for (const [index, account] of accounts.entries()) {
@@ -219,15 +214,11 @@ async function sendNotifications(title, content) {
             }
         }
 
-        // 生成报表，添加双横线装饰
+        // 生成报表
         if (lastAccountData) {
-            const summaryTitle = '  容量汇总与变动';
-            reportLines.push('');
-            reportLines.push('='.repeat(sampleAccountLog.length));
-            reportLines.push(summaryTitle);
             reportLines.push(`  🆔 账户名称: ${lastAccountData.user}`);
             reportLines.push(`  📋 个人云容量: ${lastAccountData.personalGB.toFixed(2)}G（本次 +${lastAccountData.personalAdd}M）`);
-            reportLines.push(`  🏠 家庭云容量: ${lastAccountData.familyGB.toFixed(2)}G（家庭云合计 +${totalFamilyAdd}M）`);
+            reportLines.push(`  🏠 家庭云容量: ${lastAccountData.familyGB.toFixed(2)}G（家庭合计 +${totalFamilyAdd}M）`);
             reportLines.push(`  ✅ 家庭云成功执行个数: ${totalFamilySuccessCount}`);
         }
 
@@ -241,3 +232,4 @@ async function sendNotifications(title, content) {
         recording.erase();
     }
 })();
+
