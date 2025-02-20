@@ -59,7 +59,7 @@ const doFamilyTask = async (cloudClient) => {
         const { familyInfoResp } = await cloudClient.getFamilyList();
         if (familyInfoResp?.length) {
             const { familyId } = familyInfoResp[0];
-            const res = await cloudClient.familyUserSign(165515815004439);
+            const res = await cloudClient.familyUserSign(家庭ID待改);
             if (!res || typeof res.bonusSpace === 'undefined') {
                 logger.error('家庭签到返回数据格式错误:', res);
                 const msg = `❌ 家庭: 家庭任务失败：返回数据格式错误`;
